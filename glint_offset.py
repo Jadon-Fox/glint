@@ -80,7 +80,6 @@ def run(M=8, N=64, K=64, blocksize=64, tile_k=64, seed=0) -> dict:
                 "shows_up_in": "max_abs goldens vs launch",
             },
         ],
-        "": False,
     }
 if __name__ == "__main__":
     print(json.dumps(run(), indent=2))

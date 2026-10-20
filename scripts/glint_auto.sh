@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # GLINT auto: BF16 LLM → CUDA encode pin → orch course train.
 # One kernel for every model. Pins change; PTX does not.
-# =false. Requires 3060 + nvcc + orch tree.
+# Requires 3060 + nvcc + orch tree.
 #
 # Usage:
 # bash scripts/glint_auto.sh --src /path/to/bf16 --course tdc_v2 --steps 8
@@ -72,7 +72,6 @@ python3 - <<PY
 import json,sys
 p=json.load(open("$OUT_PIN/pin.json"))
 assert p.get("schema")=="glint_pin_v1", p
-assert p.get("") is False
 print("pin_ok", p.get("n_converted"), "backend", p.get("backend"))
 PY
 # --- 3. place + train (orch). Loader must honor ORCH_GLINT_PIN (L0 prompt). ---

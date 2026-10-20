@@ -5,12 +5,26 @@
  *
  * Tile: M=16 N=16 K=64. Block 16×16 = 256 threads. Ampere sm_86.
  * nvcc -O3 -arch=sm_86 -I../include -c cuda/glint_htile.cu
- * =false.
  */
 #include "../include/glint_meta.h"
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <stdint.h>
+#include <string.h>
+
+static __constant__ float d_cells[16][16];
+
+static int load_cells() {
+    static int once = 0;
+    if (once)
+        return 0;
+    float host_cells[16][16];
+    memcpy(host_cells, GLINT_CELLS, sizeof(host_cells));
+    if (cudaMemcpyToSymbol(d_cells, host_cells, sizeof(host_cells)) != cudaSuccess)
+        return -1;
+    once = 1;
+    return 0;
+}
 #define TN 16
 #define TM 16
 #define TK 64
@@ -116,7 +130,7 @@ __global__ void glint_htile_s3_f32(
                 const uint8_t h = (kk & 1) ? (uint8_t)((hb >> 4) & 15) : (uint8_t)(hb & 15);
                 const uint8_t p = (kk & 1) ? (uint8_t)((pb >> 4) & 15) : (uint8_t)(pb & 15);
                 const int64_t i = (int64_t)n * K + (k0 + kk);
-                acc += glint_inflate(h, p, absmax[i / blocksize]) *
+                acc += d_cells[h][p] * absmax[i / blocksize] *
                        __bfloat162float(sh_x[cur][tm][kk]);
             }
         }
@@ -134,6 +148,8 @@ extern "C" int launch_glint_htile_s3_f32(
         return -1;
     if (blocksize <= 0 || (K % 2) != 0)
         return -2;
+    if (load_cells() != 0)
+        return -4;
     dim3 blk(TN, TM);
     dim3 grid((N + TN - 1) / TN, (M + TM - 1) / TM);
     glint_htile_s3_f32<<<grid, blk>>>(d_hole, d_plug, d_absmax, d_x, d_y, M, N, K, blocksize);
