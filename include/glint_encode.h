@@ -1,6 +1,5 @@
 /* GLINT encode FFI — BF16/F32 on device → packed hole+plug.
  * Product path is CUDA. Host Python encode is tests only.
- * =false.
  */
 #ifndef GLINT_ENCODE_H_
 #define GLINT_ENCODE_H_
