@@ -7,6 +7,7 @@
  * nvcc -O3 -arch=sm_86 -I../include -c cuda/glint_htile.cu
  */
 #include "../include/glint_meta.h"
+#include "../include/glint_htile_load.h"
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <stdint.h>
@@ -69,9 +70,13 @@ __device__ void load_k_tile(
         const int row = tid / 2; /* 0..15 */
         const int off = (tid % 2) * 16; /* 0 or 16 */
         const int n = n0 + row;
-        if (n < N && k0 < K) {
-            const int64_t i0 = (int64_t)n * (int64_t)K + k0;
-            cp16(&sh_h[s][row][off], hole + (i0 >> 1) + off);
+        const int k = k0 + 2 * off;
+        const int64_t i = (int64_t)n * K + k;
+        if (n < N && k + 32 <= K && (i % 32) == 0) {
+            cp16(&sh_h[s][row][off], hole + (i >> 1));
+        } else {
+            for (int b = 0; b < 16; ++b)
+                sh_h[s][row][off + b] = glint_packed_tile_byte(hole, n, N, K, k + 2 * b);
         }
     }
     /* plug: tid 32..63, same map */
@@ -80,9 +85,13 @@ __device__ void load_k_tile(
         const int row = t / 2;
         const int off = (t % 2) * 16;
         const int n = n0 + row;
-        if (n < N && k0 < K) {
-            const int64_t i0 = (int64_t)n * (int64_t)K + k0;
-            cp16(&sh_p[s][row][off], plug + (i0 >> 1) + off);
+        const int k = k0 + 2 * off;
+        const int64_t i = (int64_t)n * K + k;
+        if (n < N && k + 32 <= K && (i % 32) == 0) {
+            cp16(&sh_p[s][row][off], plug + (i >> 1));
+        } else {
+            for (int b = 0; b < 16; ++b)
+                sh_p[s][row][off + b] = glint_packed_tile_byte(plug, n, N, K, k + 2 * b);
         }
     }
     /* X: 16×64 bf16 = 2048 B → 128 × 16B. tid walks 128 chunks. */
@@ -93,8 +102,14 @@ __device__ void load_k_tile(
             const int row = elem / TK;
             const int col = elem % TK;
             const int m = m0 + row;
-            if (m < M && (k0 + col) < K)
-                cp16(&sh_x[s][row][col], x + (int64_t)m * K + k0 + col);
+            const int k = k0 + col;
+            const int64_t i = (int64_t)m * K + k;
+            if (m < M && k + 8 <= K && (i % 8) == 0) {
+                cp16(&sh_x[s][row][col], x + i);
+            } else {
+                for (int e = 0; e < 8; ++e)
+                    sh_x[s][row][col + e] = glint_x_tile_element(x, m, M, K, k + e);
+            }
         }
     }
     cp_commit();
@@ -111,9 +126,9 @@ __global__ void glint_htile_s3_f32(
     const int m0 = blockIdx.y * TM;
     const int tn = threadIdx.x;
     const int tm = threadIdx.y;
-    __shared__ uint8_t sh_h[STAGES][TN][HOLE_B];
-    __shared__ uint8_t sh_p[STAGES][TN][HOLE_B];
-    __shared__ __nv_bfloat16 sh_x[STAGES][TM][TK];
+    __shared__ __align__(16) uint8_t sh_h[STAGES][TN][HOLE_B];
+    __shared__ __align__(16) uint8_t sh_p[STAGES][TN][HOLE_B];
+    __shared__ __align__(16) __nv_bfloat16 sh_x[STAGES][TM][TK];
     float acc = 0.f;
     int cur = 0;
     load_k_tile(0, n0, m0, 0, N, M, K, hole, plug, x, sh_h, sh_p, sh_x);
@@ -134,6 +149,7 @@ __global__ void glint_htile_s3_f32(
                        __bfloat162float(sh_x[cur][tm][kk]);
             }
         }
+        __syncthreads();
         cur ^= 1;
     }
     if ((m0 + tm) < M && (n0 + tn) < N)
@@ -146,7 +162,7 @@ extern "C" int launch_glint_htile_s3_f32(
 {
     if (!d_hole || !d_plug || !d_absmax || !d_x || !d_y)
         return -1;
-    if (blocksize <= 0 || (K % 2) != 0)
+    if (blocksize <= 0)
         return -2;
     if (load_cells() != 0)
         return -4;
