@@ -1,0 +1,58 @@
+{
+  "driver": "595.99.02",
+  "n_tokens": 223,
+  "bit_diffs_iii_vs_iv": 0,
+  "bit_identical_pass": true,
+  "delta_ppl_percent": 0.5668,
+  "ppl_verdict": "PASS (within 2.0% threshold)",
+  "arms": {
+    "int8": {
+      "ppl": 98.814890,
+      "prefill_tok_s_median": 18.37,
+      "prefill_tok_s_min": 17.68,
+      "prefill_tok_s_max": 18.46,
+      "decode_tok_s_median": 4.42,
+      "decode_tok_s_min": 4.41,
+      "decode_tok_s_max": 4.42,
+      "peak_vram_mib": 6279.6,
+      "peak_host_ram_mib": 4723.9
+    },
+    "hole_only": {
+      "ppl": 1271006829514493.750000,
+      "prefill_tok_s_median": 20.98,
+      "prefill_tok_s_min": 20.95,
+      "prefill_tok_s_max": 21.03,
+      "decode_tok_s_median": 1.47,
+      "decode_tok_s_min": 1.47,
+      "decode_tok_s_max": 1.47,
+      "peak_vram_mib": 4801.9,
+      "peak_host_ram_mib": 9581.1
+    },
+    "prefetched": {
+      "ppl": 98.254806,
+      "prefill_tok_s_median": 15.70,
+      "prefill_tok_s_min": 15.64,
+      "prefill_tok_s_max": 15.72,
+      "decode_tok_s_median": 1.09,
+      "decode_tok_s_min": 1.09,
+      "decode_tok_s_max": 1.09,
+      "peak_vram_mib": 4853.8,
+      "peak_host_ram_mib": 11117.4
+    },
+    "resident": {
+      "ppl": 98.254806,
+      "prefill_tok_s_median": 15.86,
+      "prefill_tok_s_min": 15.85,
+      "prefill_tok_s_max": 15.87,
+      "decode_tok_s_median": 1.29,
+      "decode_tok_s_min": 1.29,
+      "decode_tok_s_max": 1.29,
+      "peak_vram_mib": 6283.8,
+      "peak_host_ram_mib": 11285.8
+    }
+  },
+  "streamer": {
+    "total_stall_ms": 5.207,
+    "h2d_bytes": 1610612736
+  }
+}

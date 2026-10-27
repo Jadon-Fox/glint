@@ -1,0 +1,21 @@
+{
+  "corpus_path": "/opt/models/science_log/SCIENCE_JOURNAL.md",
+  "corpus_sha256": "ca7951a114d367aad8cf625c391dc173d794fb1cd7eff9476dc019ae21797b15",
+  "token_count": 2048,
+  "token_sha256": "20c509255ea4d76f7a6603984af500775aa785858d5ac5719532d1f9f90424ad",
+  "model_dir": "/opt/models/.hf_cache/hub/models--microsoft--Phi-4-mini-instruct/snapshots/cfbefacb99257ffa30c83adab238a50856ac3083",
+  "loss": 1.7023737040390663,
+  "ppl": 5.486956596374512,
+  "sample_first_10_top1": [
+    18574,
+    18421,
+    2024,
+    13,
+    13,
+    533,
+    19751,
+    533,
+    2,
+    21121
+  ]
+}
