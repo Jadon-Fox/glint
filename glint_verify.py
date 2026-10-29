@@ -37,6 +37,10 @@ def _source_index(src: Path) -> Dict[str, SafeTensorsFile]:
 def _first_diff(a: bytes, b: bytes) -> Optional[int]:
     if len(a) != len(b):
         return min(len(a), len(b))
+    if a == b:
+        return None
+    if np is not None:
+        return int(np.flatnonzero(np.frombuffer(a, np.uint8) != np.frombuffer(b, np.uint8))[0])
     for i, (x, y) in enumerate(zip(a, b)):
         if x != y:
             return i

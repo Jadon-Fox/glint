@@ -55,5 +55,10 @@ jobs:
         run: bash scripts/build_glint_cuda.sh
       - name: Compile H-TILE object (sm_86)
         run: nvcc -O3 -std=c++17 -arch=sm_86 -Iinclude -c cuda/glint_htile.cu -o glint_htile.o
+      - name: glint_encode.h declares the device entry point in any include order
+        run: |
+          printf '#include "glint_encode.h"\nvoid *p = (void *)glint_expand_packed_to_f32_device;\n' | gcc -fsyntax-only -Wall -Werror -Iinclude -x c -
+          printf '#include "glint_encode.h"\n#include <cuda_runtime.h>\nint main() { cudaStream_t s = 0; return glint_expand_packed_to_f32_device(0, 0, 0, 0, 1, 0, s); }\n' > order.cu
+          nvcc -std=c++17 -Iinclude -c order.cu -o order.o
       - name: Exported symbols
         run: nm -D libglint_encode.so | grep -E ' T glint_'

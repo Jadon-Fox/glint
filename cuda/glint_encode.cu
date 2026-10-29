@@ -3,7 +3,7 @@
  * cuda/glint_encode.cu -Iinclude
  */
 #include <cuda_bf16.h>
-#include <cuda_runtime.h> /* before glint_encode.h: it gates the cudaStream_t entry point */
+#include <cuda_runtime.h>
 #include "../include/glint_encode.h"
 #include "../include/glint_cells.h"
 #include "../include/glint_meta.h"
