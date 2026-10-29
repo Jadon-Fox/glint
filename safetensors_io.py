@@ -63,14 +63,13 @@ class SafeTensorsFile:
         return self._fp.read(info.nbytes)
     def names(self) -> List[str]:
         return list(self.tensors.keys())
-def _align8(n: int) -> int:
-    return (n + 7) & ~7
 def write_safetensors(
     path: str,
     tensors: Iterable[Tuple[str, str, Tuple[int, ...], bytes]],
     metadata: Optional[Mapping[str, str]] = None,
 ) -> None:
-    """Write tensors as (name, dtype, shape, raw_bytes). 8-byte aligned."""
+    """Write tensors as (name, dtype, shape, raw_bytes). Header padded to 8 bytes;
+    data contiguous with no gaps or tail, as the spec requires."""
     planned: List[Tuple[str, str, Tuple[int, ...], bytes, int, int]] = []
     cursor = 0
     for name, dtype, shape, blob in tensors:
@@ -79,7 +78,7 @@ def write_safetensors(
         start = cursor
         end = start + len(blob)
         planned.append((name, dtype, shape, blob, start, end))
-        cursor = _align8(end)
+        cursor = end
     header: dict = {}
     if metadata:
         header["__metadata__"] = {str(k): str(v) for k, v in metadata.items()}
@@ -103,6 +102,3 @@ def write_safetensors(
                 pos = start
             fp.write(blob)
             pos = end
-        tail = _align8(pos)
-        if tail > pos:
-            fp.write(b"\x00" * (tail - pos))

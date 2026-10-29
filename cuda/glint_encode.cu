@@ -2,11 +2,11 @@
  * nvcc -O3 -arch=sm_86 -shared -Xcompiler -fPIC -o libglint_encode.so \
  * cuda/glint_encode.cu -Iinclude
  */
+#include <cuda_bf16.h>
+#include <cuda_runtime.h> /* before glint_encode.h: it gates the cudaStream_t entry point */
 #include "../include/glint_encode.h"
 #include "../include/glint_cells.h"
 #include "../include/glint_meta.h"
-#include <cuda_bf16.h>
-#include <cuda_runtime.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -243,4 +243,20 @@ done:
     cudaFree(d_am);
     cudaFree(d_o);
     return rc;
+}
+/* L0 load, device pointers: nothing crosses PCIe, f32 W stays on the GPU. */
+int glint_expand_packed_to_f32_device(
+    const uint8_t *d_hole_packed, const uint8_t *d_plug_packed, const float *d_absmax,
+    int64_t n, int blocksize, float *d_out_f32, cudaStream_t stream)
+{
+    if (!d_hole_packed || !d_plug_packed || !d_absmax || !d_out_f32 || blocksize <= 0)
+        return -1;
+    if (load_cells() != 0)
+        return -2;
+    if (n <= 0)
+        return 0;
+    int threads = 256;
+    int64_t blocks = (n + threads - 1) / threads;
+    k_expand<<<(unsigned)blocks, threads, 0, stream>>>(d_hole_packed, d_plug_packed, d_absmax, d_out_f32, n, blocksize);
+    return cudaGetLastError() == cudaSuccess ? 0 : -3;
 }

@@ -30,11 +30,15 @@ def unpack_f16(buf: bytes | bytearray) -> List[float]:
         out[i] = _f16_to_f32(h)
     return out
 def pack_bf16(vals: Sequence[float]) -> bytes:
-    """Round-to-nearest even-ish: take high 16 bits of f32 (trunc toward 0 on ties)."""
+    """f32 -> bf16, round to nearest even (same as torch). NaN stays a quiet NaN."""
     out = bytearray(len(vals) * 2)
     for i, v in enumerate(vals):
         (u,) = struct.unpack("<I", struct.pack("<f", float(v)))
-        struct.pack_into("<H", out, i * 2, (u >> 16) & 0xFFFF)
+        if math.isnan(v):
+            h = (u >> 16) | 0x40
+        else:
+            h = (u + 0x7FFF + ((u >> 16) & 1)) >> 16
+        struct.pack_into("<H", out, i * 2, h & 0xFFFF)
     return bytes(out)
 def unpack_dense(dtype: str, buf: bytes, shape: Tuple[int, ...]) -> List[float]:
     if dtype == "BF16":

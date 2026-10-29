@@ -1,4 +1,4 @@
-# Required-check candidate: pytest smoke. Advisory: CodeQL only — do not require as merge gate.
+# Required-check candidate: pytest smoke. Advisory: pytest numpy, cuda compile, CodeQL — do not require as merge gate.
 name: CI
 
 on:
@@ -26,5 +26,34 @@ jobs:
           python-version: "3.12"
       - name: Install pytest
         run: pip install pytest
-      - name: Run codec/pin smoke tests (no CUDA build)
-        run: python -m pytest -q test_glint.py
+      - name: Run codec/pin/tool tests, stdlib only (no CUDA build)
+        run: python -m pytest -q
+
+  pytest-numpy:
+    name: pytest numpy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pytest + numpy
+        run: pip install pytest numpy safetensors
+      - name: Run tests with the f32-exact numpy encoder
+        run: python -m pytest -q -rs
+
+  cuda-compile:
+    name: cuda compile
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nvcc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends nvidia-cuda-toolkit
+      - name: Build libglint_encode.so (sm_86)
+        run: bash scripts/build_glint_cuda.sh
+      - name: Compile H-TILE object (sm_86)
+        run: nvcc -O3 -std=c++17 -arch=sm_86 -Iinclude -c cuda/glint_htile.cu -o glint_htile.o
+      - name: Exported symbols
+        run: nm -D libglint_encode.so | grep -E ' T glint_'
