@@ -57,6 +57,12 @@ __device__ __forceinline__ void cp_wait(int n) {
 #endif
     __syncthreads();
 }
+/* cp.async 16 B needs a 16-byte-aligned global address, not just an aligned index:
+ * a caller may pass a pointer into a larger buffer (e.g. a whole uploaded shard). */
+__device__ __forceinline__ bool aligned16(const void *p)
+{
+    return (reinterpret_cast<uintptr_t>(p) & 15) == 0;
+}
 __device__ void load_k_tile(
     int s, int n0, int m0, int k0, int N, int M, int K,
     const uint8_t *hole, const uint8_t *plug, const __nv_bfloat16 *x,
@@ -72,7 +78,7 @@ __device__ void load_k_tile(
         const int n = n0 + row;
         const int k = k0 + 2 * off;
         const int64_t i = (int64_t)n * K + k;
-        if (n < N && k + 32 <= K && (i % 32) == 0) {
+        if (n < N && k + 32 <= K && (i & 1) == 0 && aligned16(hole + (i >> 1))) {
             cp16(&sh_h[s][row][off], hole + (i >> 1));
         } else {
             for (int b = 0; b < 16; ++b)
@@ -87,7 +93,7 @@ __device__ void load_k_tile(
         const int n = n0 + row;
         const int k = k0 + 2 * off;
         const int64_t i = (int64_t)n * K + k;
-        if (n < N && k + 32 <= K && (i % 32) == 0) {
+        if (n < N && k + 32 <= K && (i & 1) == 0 && aligned16(plug + (i >> 1))) {
             cp16(&sh_p[s][row][off], plug + (i >> 1));
         } else {
             for (int b = 0; b < 16; ++b)
@@ -104,7 +110,7 @@ __device__ void load_k_tile(
             const int m = m0 + row;
             const int k = k0 + col;
             const int64_t i = (int64_t)m * K + k;
-            if (m < M && k + 8 <= K && (i % 8) == 0) {
+            if (m < M && k + 8 <= K && aligned16(x + i)) {
                 cp16(&sh_x[s][row][col], x + i);
             } else {
                 for (int e = 0; e < 8; ++e)

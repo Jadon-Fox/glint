@@ -27,6 +27,16 @@ static T *upload(const std::vector<T> &values) {
     return device;
 }
 
+/* Upload with `shift` leading elements so the kernel sees a pointer into a larger,
+ * non-16-byte-aligned buffer. Returns the base for cudaFree in *base. */
+template <typename T>
+static T *upload_shifted(const std::vector<T> &values, int shift, T **base) {
+    std::vector<T> padded(shift, T(0));
+    padded.insert(padded.end(), values.begin(), values.end());
+    *base = upload(padded);
+    return *base + shift;
+}
+
 int main() {
     cudaDeviceProp properties;
     check(cudaGetDeviceProperties(&properties, 0));
@@ -35,6 +45,7 @@ int main() {
     constexpr float canary = 123456.0f;
     int cases = 0;
     const std::pair<int, int> shapes[] = {{1, 1}, {15, 15}, {16, 16}, {17, 19}, {33, 31}};
+    for (int shift : {0, 1}) {
     for (int K : {1, 32, 40, 48, 63, 64, 65, 192, 199, 256}) {
         double worst_error = 0;
         for (const auto shape : shapes) {
@@ -54,10 +65,12 @@ int main() {
             }
             for (int i = 0; i < M * K; ++i)
                 x[i] = __float2bfloat16(float((i * 3 + i / 19) % 17 - 8) * 0.0625f);
-            auto *d_hole = upload(hole);
-            auto *d_plug = upload(plug);
+            uint8_t *b_hole, *b_plug;
+            __nv_bfloat16 *b_x;
+            auto *d_hole = upload_shifted(hole, shift, &b_hole);
+            auto *d_plug = upload_shifted(plug, shift, &b_plug);
             auto *d_scales = upload(scales);
-            auto *d_x = upload(x);
+            auto *d_x = upload_shifted(x, shift, &b_x);
             auto *d_y = upload(y);
             for (int repetition = 0; repetition < 3; ++repetition) {
                 const int status = launch_glint_htile_s3_f32(
@@ -90,14 +103,16 @@ int main() {
                     }
                 }
             }
-            check(cudaFree(d_hole));
-            check(cudaFree(d_plug));
+            check(cudaFree(b_hole));
+            check(cudaFree(b_plug));
             check(cudaFree(d_scales));
-            check(cudaFree(d_x));
+            check(cudaFree(b_x));
             check(cudaFree(d_y));
             ++cases;
         }
-        std::printf("PASS device K=%d shapes=5 repetitions=3 max_abs_error=%.9g canaries=PASS\n", K, worst_error);
+        std::printf("PASS device shift=%d K=%d shapes=5 repetitions=3 max_abs_error=%.9g canaries=PASS\n",
+                    shift, K, worst_error);
+    }
     }
     std::printf("PASS device cases=%d launches=%d independent_matmul=PASS\n", cases, cases * 3);
 }
