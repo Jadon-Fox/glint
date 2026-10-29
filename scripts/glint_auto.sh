@@ -74,6 +74,13 @@ p=json.load(open("$OUT_PIN/pin.json"))
 assert p.get("schema")=="glint_pin_v1", p
 print("pin_ok", p.get("n_converted"), "backend", p.get("backend"))
 PY
+# --- 2b. verify the pin. VERIFY=layout (default) | parity (host re-encode byte gate + GPU expand) | off ---
+VERIFY="${VERIFY:-layout}"
+if [[ "$VERIFY" != off ]]; then
+  V_ARGS=( --pin "$OUT_PIN" --quiet --out "$OUT_PIN/VERIFY.json" )
+  if [[ "$VERIFY" == parity ]]; then V_ARGS+=( --src "$SRC" --parity --cuda ); fi
+  python3 "$GLINT_ROOT/glint_verify.py" "${V_ARGS[@]}" || { echo "pin verify failed: $OUT_PIN/VERIFY.json" >&2; exit 5; }
+fi
 # --- 3. place + train (orch). Loader must honor ORCH_GLINT_PIN (L0 prompt). ---
 export ORCH_GLINT_PIN="$OUT_PIN"
 export SEED

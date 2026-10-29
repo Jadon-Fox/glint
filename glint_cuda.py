@@ -38,6 +38,15 @@ def load():
         ctypes.c_void_p,
     ]
     lib.glint_encode_bf16_host.restype = ctypes.c_int
+    lib.glint_expand_packed_to_f32_host.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int64,
+        ctypes.c_int,
+        ctypes.c_void_p,
+    ]
+    lib.glint_expand_packed_to_f32_host.restype = ctypes.c_int
     _LIB = lib
     return lib
 def encode_bf16_cuda(raw_bf16: bytes, n: int, blocksize: int = 64) -> Tuple[bytes, bytes, bytes]:
@@ -54,3 +63,23 @@ def encode_bf16_cuda(raw_bf16: bytes, n: int, blocksize: int = 64) -> Tuple[byte
     if rc != 0:
         raise RuntimeError(f"glint_encode_bf16_host rc={rc}")
     return bytes(hole), bytes(plug), bytes(ctypes.string_at(ctypes.addressof(am), n_am * 4))
+def expand_cuda(hole: bytes, plug: bytes, absmax_f32: bytes, n: int, blocksize: int = 64) -> bytes:
+    """GPU expand (k_expand) → n little-endian f32. The L0 golden vs host decode."""
+    lib = load()
+    if lib is None:
+        raise RuntimeError(_ERR)
+    out = (ctypes.c_float * n)()
+    h = ctypes.create_string_buffer(bytes(hole), len(hole))
+    p = ctypes.create_string_buffer(bytes(plug), len(plug))
+    a = ctypes.create_string_buffer(bytes(absmax_f32), len(absmax_f32))
+    rc = lib.glint_expand_packed_to_f32_host(h, p, a, n, blocksize, out)
+    if rc != 0:
+        raise RuntimeError(f"glint_expand_packed_to_f32_host rc={rc}")
+    return bytes(ctypes.string_at(ctypes.addressof(out), n * 4))
+def gpu_ok() -> bool:
+    """Library loads and a 2-weight encode runs. False on a box with no GPU."""
+    try:
+        encode_bf16_cuda(b"\x80\x3f\x00\x00", 2, 64)
+        return True
+    except (RuntimeError, OSError):
+        return False

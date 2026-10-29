@@ -20,6 +20,13 @@ int glint_encode_n_packed(int64_t n);
 int glint_expand_packed_to_f32_host(
     const uint8_t *hole_packed, const uint8_t *plug_packed, const float *absmax,
     int64_t n, int blocksize, float *out_f32);
+/* L0 load, device pointers in and out, async on stream. No host round-trip of W.
+ * `stream` is a cudaStream_t (that typedef is `struct CUstream_st *`), spelled out so
+ * the declaration does not depend on include order. */
+struct CUstream_st;
+int glint_expand_packed_to_f32_device(
+    const uint8_t *d_hole_packed, const uint8_t *d_plug_packed, const float *d_absmax,
+    int64_t n, int blocksize, float *d_out_f32, struct CUstream_st *stream);
 #ifdef __cplusplus
 }
 #endif
