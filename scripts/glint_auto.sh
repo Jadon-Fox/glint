@@ -36,7 +36,7 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$SRC" ]] || { echo "--src BF16 dir or safetensors required" >&2; exit 2; }
 if [[ -z "$ORCH" ]]; then
-  for d in /home/workspace/training_orchestrator "$GLINT_ROOT/../training_orchestrator" /workspace/training_orchestrator; do
+  for d in "$GLINT_ROOT/../training_orchestrator" /workspace/training_orchestrator; do
     if [[ -x "$d/scripts/run_tdc_muon_course.sh" ]]; then ORCH="$d"; break; fi
   done
 fi
