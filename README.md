@@ -39,3 +39,5 @@ Encode is **CUDA**: raw BF16 bytes go to the GPU; no Python float walk. That was
 
 INT8 pin stays in [nf4-to-int8](https://github.com/Jadon-Fox/nf4-to-int8) (`--to int8`). Both from BF16; different 256.
 Sim is **done** (offset board). Product is CUDA encode + CUDA expand. GPU evidence workflow: [`GROK_BUILD_GPU_TEST.md`](GROK_BUILD_GPU_TEST.md). Orch wire-up: [`GROK_BUILD_ORCH_GLINT_PROMPT.md`](GROK_BUILD_ORCH_GLINT_PROMPT.md).
+
+**Project 7 attach (INT8 W8A8 + plug ring, orchestrator gate):** [`attach/CONTRACT.md`](attach/CONTRACT.md) — `training_orchestrator/scripts/orch_p7_start_gate.sh` runs `runtime_attach.sh` then GPU `p7_attach_check` / `p7_abi_selftest`. Build kernels: `bash scripts/build_p7_kernels.sh`. Mojo forward / plug measurement notes (not attach proof): [`docs/p7_mode3_fold/`](docs/p7_mode3_fold/) (`MOJO_FORWARD_phi4mini.md`, `GATE_RULES.md`).
