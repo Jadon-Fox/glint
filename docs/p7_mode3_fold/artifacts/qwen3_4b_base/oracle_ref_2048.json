@@ -1,0 +1,28 @@
+{
+  "model_dir": "/home/workspace/pins/Qwen3-4B-Base-BF16",
+  "corpus_path": "/opt/models/science_log/SCIENCE_JOURNAL.md",
+  "corpus_sha256": "ca7951a114d367aad8cf625c391dc173d794fb1cd7eff9476dc019ae21797b15",
+  "token_count": 2048,
+  "tokens_sha256": "695c1742b454ea4451ba4a7c462b84ef254e7eb9b44d9d4526fe2c994aeb69f6",
+  "top1_sha256": "d29bb607a385fbfe3850df953bd4259117527daae0f78ca09e82090f91f9d6fc",
+  "mean_loss": 1.5072630279869002,
+  "ppl": 4.5143585205078125,
+  "dtype": "torch.bfloat16",
+  "attn_implementation": "sdpa",
+  "transformers": "4.57.6",
+  "torch": "2.5.1+cu121",
+  "device": "NVIDIA GeForce RTX 3060",
+  "vocab": 151936,
+  "first_10_top1": [
+    12017,
+    2336,
+    2447,
+    808,
+    13,
+    220,
+    271,
+    271,
+    565,
+    1916
+  ]
+}
