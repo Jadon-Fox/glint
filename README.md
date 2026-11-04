@@ -39,3 +39,29 @@ Encode is **CUDA**: raw BF16 bytes go to the GPU; no Python float walk. That was
 
 INT8 pin stays in [nf4-to-int8](https://github.com/Jadon-Fox/nf4-to-int8) (`--to int8`). Both from BF16; different 256.
 Sim is **done** (offset board). Product is CUDA encode + CUDA expand. GPU evidence workflow: [`GROK_BUILD_GPU_TEST.md`](GROK_BUILD_GPU_TEST.md). Orch wire-up: [`GROK_BUILD_ORCH_GLINT_PROMPT.md`](GROK_BUILD_ORCH_GLINT_PROMPT.md).
+
+## Project 7 (Mode 3 fold) — developer index
+
+Orchestrator attach and ABI: [`attach/CONTRACT.md`](attach/CONTRACT.md), `attach/runtime_attach.sh`, `scripts/build_p7_kernels.sh` → `lib/libp7_kernels.so`. Training gate: `training_orchestrator/scripts/orch_p7_start_gate.sh` (`docs/designs/2026-11-04-ORCH-P7-START-GATE.md` in that repo).
+
+**Rules and narrative (read before interpreting artifacts):**
+
+| Doc | Role |
+|-----|------|
+| [`docs/p7_mode3_fold/GATE_RULES.md`](docs/p7_mode3_fold/GATE_RULES.md) | Pre-registered arms, pass/fail bounds, driver lease |
+| [`docs/p7_mode3_fold/M4_LOSSY_AMENDMENT_2026-11-03.md`](docs/p7_mode3_fold/M4_LOSSY_AMENDMENT_2026-11-03.md) | M4-LOSSY knob (residual plug bit width `b`) before lossy runs |
+| [`docs/p7_mode3_fold/LEDGER_ENTRY_DRAFT_2026-11-02.md`](docs/p7_mode3_fold/LEDGER_ENTRY_DRAFT_2026-11-02.md) | Cross-arm summary (Mojo forward, M4 sweep, Huffman) |
+| `docs/p7_mode3_fold/artifacts/` | Measured JSON/TSV/MD receipts (e.g. `RETEST_2026-11-03.md`, `M4_LOSSY_RESULTS_phi4mini.md`) |
+
+**Host / GPU scripts:**
+
+```bash
+bash scripts/build_p7_kernels.sh          # libp7_kernels.so + p7_attach_check (container nvcc)
+bash scripts/retest_all.sh OUT_DIR      # full GPU matrix; OUT_DIR must not exist; see artifacts/RETEST_2026-11-03.md
+bash scripts/run_qc_questions.sh          # Stage 0 question list (QC pools → p7-s0-questions.list)
+bash scripts/run_arm0_anchor.sh           # Phi-4 Arm 0 harness entry (2047-token eval)
+```
+
+**Codecs and tools:** `tools/plug_encode.c` (M4-LOSSY plug synthesis + RMSE JSON), `tools/glint_huff.c` (M4-LOSSLESS Huffman over hole/plug index streams). **Mojo forward path:** `mojo/p7_forward.mojo` (built by `retest_all.sh`); layer pieces under `mojo/p7_*.mojo`.
+
+**Pitfall:** `retest_all.sh` refuses an existing `OUT_DIR` unless `RETEST_APPEND=1`. Arm 0 PPL arms are Phi-4-shaped; Qwen3 pin parity is documented in `RETEST_2026-11-03.md` without a forward/PPL claim.
