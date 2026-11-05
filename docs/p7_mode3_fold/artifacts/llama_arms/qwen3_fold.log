@@ -1,0 +1,16 @@
+config: H=2560 I=9728 L=36 NQ=32 NKV=8 HD=128 V=151936 eps=1e-06 theta=1e+06 qknorm=1 bias=0 tie=1
+arms: mode=fold oracle PPL 4.514359
+Weights uploaded (GLINT fold only (parent decode)).
+Starting forward pass over 36 layers...
+
+=== fold ===
+Forward Pass Time:      12.622 s
+Mean Cross Entropy:     1.529453
+Measured Perplexity:    4.615653
+HuggingFace Oracle PPL: 4.514359
+PPL Delta vs Oracle:    2.2438 %
+Top-1 Matches:          1892 / 2047
+Top-1 Agreement:        92.43 %
+KL vs reference: mean 2.873404e-02 p99 2.016318e-01 max 2.144027e+00 (2047 tokens)
+VERDICT: REPORT ONLY (fold)
+rc=0

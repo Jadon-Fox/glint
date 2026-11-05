@@ -1,0 +1,16 @@
+config: H=1536 I=8960 L=28 NQ=12 NKV=2 HD=128 V=151936 eps=1e-06 theta=10000 qknorm=0 bias=1 tie=0
+arms: mode=full oracle PPL 10.832062
+Weights uploaded (GLINT hole + plug).
+Starting forward pass over 28 layers...
+
+=== full ===
+Forward Pass Time:      4.061 s
+Mean Cross Entropy:     2.402611
+Measured Perplexity:    11.051991
+HuggingFace Oracle PPL: 10.832062
+PPL Delta vs Oracle:    2.0304 %
+Top-1 Matches:          2010 / 2047
+Top-1 Agreement:        98.19 %
+KL vs reference: mean 1.954774e-03 p99 1.811241e-02 max 1.394984e-01 (2047 tokens)
+VERDICT: REPORT ONLY (full)
+rc=0
