@@ -39,3 +39,18 @@ Encode is **CUDA**: raw BF16 bytes go to the GPU; no Python float walk. That was
 
 INT8 pin stays in [nf4-to-int8](https://github.com/Jadon-Fox/nf4-to-int8) (`--to int8`). Both from BF16; different 256.
 Sim is **done** (offset board). Product is CUDA encode + CUDA expand. GPU evidence workflow: [`GROK_BUILD_GPU_TEST.md`](GROK_BUILD_GPU_TEST.md). Orch wire-up: [`GROK_BUILD_ORCH_GLINT_PROMPT.md`](GROK_BUILD_ORCH_GLINT_PROMPT.md).
+
+## Project 7 attach (orchestrator)
+
+Orch arms glint through [`attach/runtime_attach.sh`](attach/runtime_attach.sh) and **`training_orchestrator/scripts/orch_p7_start_gate.sh`**, which requires a passing GPU `p7_abi_selftest` (resident vs streamed INT8 stack). Contract: [`attach/CONTRACT.md`](attach/CONTRACT.md). Runbook: `training_orchestrator/docs/designs/2026-11-05-ORCH-P7-START-GATE.md`. Build kernels: `bash scripts/build_p7_kernels.sh`.
+
+## Mode-3 fold developer path
+
+Evidence and gate rules live under [`docs/p7_mode3_fold/`](docs/p7_mode3_fold/) (`GATE_RULES.md`, `LOG.md`, artifact JSON/TSV). **Full GPU retest** after driver/firmware or kernel changes:
+
+```bash
+bash scripts/retest_all.sh /path/to/NEW_RETEST_DIR   # must not exist; exit 0 only if every step passed
+# Rerun subset: RETEST_APPEND=1 RETEST_ONLY='arm0_int8' bash scripts/retest_all.sh /path/to/existing_dir
+```
+
+Default paths assume container `40-Runtime-Deps`, Phi-4-mini instruct snapshot, and pins under `/home/workspace/pins/` (see script header). Multi-model pin builds (DeepSeek, SmolLM2, Qwen3-4B-Base) are documented in [`docs/p7_mode3_fold/artifacts/RETEST_2026-11-03.md`](docs/p7_mode3_fold/artifacts/RETEST_2026-11-03.md) with verify JSON alongside; Qwen3 forward/PPL on the Phi-shaped Arm 0 harness is explicitly **not** claimed there.
