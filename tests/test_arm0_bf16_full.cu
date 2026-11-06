@@ -250,6 +250,11 @@ static void cells_bits_fixed(float out[16][16], int b) {
 }
 static void cells_for_bits(float out[16][16]) {
     memcpy(out, GLINT_CELLS, sizeof(float) * 256);
+    if (const char *cf = getenv("ARM0_CELLS_FILE")) { /* spec Amendment 11b: a custom 16x16 child table (256 floats, text) replaces the built-in one */
+        FILE *f = fopen(cf, "r"); if (!f) setup_fail("cannot open ARM0_CELLS_FILE");
+        for (int i = 0; i < 256; i++) if (fscanf(f, "%f", &out[i >> 4][i & 15]) != 1) setup_fail("ARM0_CELLS_FILE needs 256 floats");
+        fclose(f); printf("ARM0_CELLS_FILE=%s: custom child table\n", cf);
+    }
     const char *e = getenv("GLINT_PLUG_BITS"); int b = e ? atoi(e) : 4; if (b >= 4 || b < 1) return;
     const int bin = 1 << (4 - b);
     for (int h = 0; h < 16; h++) for (int s0 = 0; s0 < 16; s0 += bin) {
@@ -929,6 +934,35 @@ int main(int argc, char** argv) {
         printf("DECODE_GEN:"); for (int g : gen) printf(" %d", g); printf("\n");
         const char *dro = getenv("ARM0_DECODE_OUT"); if (dro) { FILE *fo = fopen(dro, "w"); for (size_t i = 0; i < gen.size(); i++) fprintf(fo, "%s%d", i ? " " : "", gen[i]); fprintf(fo, "\n"); fclose(fo); }
         fflush(stdout);
+    }
+
+    /* ARM0_DECODE_GATE=N (spec Amendment 12): the recorded teacher-forced gate (GATE_RULES.md) through the KV-cache decode path. The true tokens
+     * 0..N-1 are stepped in order, so selection (ARM0_SELFETCH*) acts per token exactly as in decode. Reports PPL and top-1 against the HF
+     * oracle and, with ARM0_LOGITS_REF, KL(ref || arm) per token; ARM0_DECODE_GATE_OUT receives one line per position (pos top1 oracle_top1 CE kl). */
+    if (getenv("ARM0_DECODE_GATE")) {
+        int N = atoi(getenv("ARM0_DECODE_GATE")); if (N > 2047) N = 2047;
+        DecBufs gb; dec_alloc(gb);
+        const char *gref = getenv("ARM0_LOGITS_REF"), *gout = getenv("ARM0_DECODE_GATE_OUT");
+        FILE *fr = gref ? fopen(gref, "rb") : NULL; FILE *fo = gout ? fopen(gout, "w") : NULL;
+        float *hrow = (float *)malloc((size_t)VOCAB_SIZE * 4), *dref = NULL, *dkl = NULL; int32_t *drt = NULL, *dqt = NULL;
+        if (fr) { CK(cudaMalloc(&dref, (size_t)VOCAB_SIZE * 4)); CK(cudaMalloc(&dkl, 4)); CK(cudaMalloc(&drt, 4)); CK(cudaMalloc(&dqt, 4)); }
+        double sce = 0; int eq = 0; std::vector<float> kls;
+        for (int pos = 0; pos < N; pos++) {
+            int32_t t1; float ls; dec_step(&model, gb, ev.tokens[pos], pos, ev.tokens[pos + 1], cublas_linear, &lin, lin.cublas, &t1, &ls);
+            float kl = -1.f;
+            if (fr) {
+                if (fread(hrow, 4, (size_t)VOCAB_SIZE, fr) != (size_t)VOCAB_SIZE) setup_fail("short read %s", gref);
+                CK(cudaMemcpy(dref, hrow, (size_t)VOCAB_SIZE * 4, cudaMemcpyHostToDevice));
+                kl_and_argmax_kernel<<<1, 256>>>(dref, gb.logits, dkl, drt, dqt, 1, VOCAB_SIZE); CK(cudaMemcpy(&kl, dkl, 4, cudaMemcpyDeviceToHost)); kls.push_back(kl);
+            }
+            sce += ls; eq += (t1 == (int32_t)oracle_top1[pos]);
+            if (fo) fprintf(fo, "%d %d %d %.7g %.7g\n", pos, t1, (int)oracle_top1[pos], ls, kl);
+        }
+        const double ppl_g = exp(sce / N), dpct = (ppl_g - oracle_ppl) / oracle_ppl * 100.0, acc = 100.0 * eq / N;
+        printf("DECODE_GATE positions=%d ppl=%.6f oracle_ppl=%.6f ppl_delta_pct=%.3f top1_vs_oracle=%d/%d (%.2f%%)", N, ppl_g, oracle_ppl, dpct, eq, N, acc);
+        if (!kls.empty()) { double ks = 0; for (float v : kls) ks += v; std::sort(kls.begin(), kls.end()); printf(" kl_mean=%.4e kl_p99=%.4e kl_max=%.4e", ks / kls.size(), kls[(size_t)(0.99 * (kls.size() - 1))], kls.back()); }
+        printf(" gate=%s\n", (acc >= 95.0 && fabs(dpct) <= 2.0) ? "PASS" : ((acc >= 95.0 && fabs(dpct) <= 5.0) ? "INCONCLUSIVE" : "FAIL"));
+        if (fr) fclose(fr); if (fo) fclose(fo); free(hrow); fflush(stdout);
     }
 
     /* ARM0_DECODE_ROLL=P,S,PL,STRIDE (spec Amendment 3): greedy generation through the KV-cache decode path for P prompts (PL tokens of the

@@ -1,0 +1,11 @@
+# Tiered and selected-fetch arms on the recorded teacher-forced gate, Phi-4-mini — spec Amendment 12, glint #92 (PRE-REGISTRATION; results appended below)
+
+Written and committed before any run. The earlier rollout bar (agreement >= 82.5%, prefix >= 20) was my own decision aid, not a recorded gate. This applies the gate that is recorded in `docs/p7_mode3_fold/GATE_RULES.md`, unchanged.
+
+**Measurement.** New harness mode `ARM0_DECODE_GATE=2047` (`tests/test_arm0_bf16_full.cu`): the true tokens 0..2046 of the fixed evaluation text are stepped in order through the KV-cache decode path (so the activation-selected fetch acts per token as in decode), teacher-forced. Reports PPL, top-1 agreement with the HF oracle (oracle PPL 5.486957), and with `ARM0_LOGITS_REF=anchor_logits.bin` (BF16 CUDA anchor) the per-token KL mean, p99, max. Per-position results (pos, top1, oracle top-1, CE, KL) are saved for every run.
+
+**Recorded rule, per arm:** PASS = top-1 vs oracle >= 95.0% and |PPL delta| <= 2.0% of the oracle PPL (<= 5.5967); INCONCLUSIVE = top-1 >= 95.0% and PPL delta in (2%, 5%]; FAIL otherwise (top-1 < 95.0% or PPL delta > 5%). KL is reported, with no threshold (as recorded). Transport integrity (streamed == resident) was already passed (`FOLD_STREAM_phi4mini.md`).
+
+**Alignment precondition (stop if it fails):** the decode path itself must match the established reference before any arm is read. (a) BF16 weights stepped through the decode path must give PPL within 0.5% of the forward-pass Arm 0 (5.491616) and top-1 agreement within 1 point of Arm 0 (98.44%). (b) The existing pin with all plug resident through the same path (`--glint-demand`, F = 1, no selection) must match the forward-path run (PPL 5.4885, top-1 98.19%) within the same tolerances. If either fails, the decode path is bisected and no arm is classified.
+
+**Arms (existing pin, built-in table):** base only (SELFETCH 0.0001); 4-bit `act` 10%, 25%, 50%; T-A (10% + 30% 3-bit); T-B (15% + 30%); F3 (10% + 10%); F4 (5% + 10%). **Repeats:** T-A and 4-bit `act` 50% are run twice (the decode path has shown run-to-run variation; both per-run results are kept, and an arm within 1 point of 95.0% is called by its worse run). Calibrated-pin arms are not in this study.
