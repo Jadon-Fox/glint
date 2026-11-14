@@ -24,7 +24,7 @@ from p7_glint_linear import glint_gemv_warp
 from p7_glint_gemv_fast import glint_gemv_fast
 from p7_decode_fast_kernels import rms_norm_block, logits_warp, ce_argmax_block
 from p7_attention_split import attention_split_partial, attention_split_combine, NCH
-from p7_select_device import select_topk, gather_rows_d, apply_corr_d, apply_corr_k, transpose_scales, gather_rows_d4, apply_corr_ks, combine_corr, KS, accum_hist, gather_rows_p4, GB, overlap_count, overlap_probe, gather_rows_fix, apply_corr_ksc
+from p7_select_device import select_topk, gather_rows_d, apply_corr_d, apply_corr_k, transpose_scales, gather_rows_d4, apply_corr_ks, combine_corr, KS, accum_hist, gather_rows_p4, GB, overlap_count, overlap_probe, overlap_age, gather_rows_fix, apply_corr_ksc
 
 comptime CTX = 2048
 comptime NT = CTX - 1
@@ -635,6 +635,12 @@ def main() raises:
     for i in range(4 * INTER):
         lyr_zero[i] = 0
     ctx.enqueue_copy(dst_buf=lyr_flags, src_buf=lyr_zero)
+    var k_age = ctx.compile_function[overlap_age[ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
+    var age_hits = ctx.enqueue_create_buffer[DType.int32](steps * LAYERS * 4 * 16)
+    var age_zero = ctx.enqueue_create_host_buffer[DType.int32](steps * LAYERS * 4 * 16)
+    for i in range(steps * LAYERS * 4 * 16):
+        age_zero[i] = 0
+    ctx.enqueue_copy(dst_buf=age_hits, src_buf=age_zero)
     var k_prb = ctx.compile_function[overlap_probe[ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
     var prb_hits = ctx.enqueue_create_buffer[DType.int32](steps * LAYERS * 4 * 2)
     var k_ovl = ctx.compile_function[overlap_count[ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin]]()
@@ -786,6 +792,7 @@ def main() raises:
                     if (not skel) or phase == 0:
                         ks.enqueue_function(k_sel, hbf16, sidx[par * 128 + l * 4 + 0], scnt[par * 128 + l * 4 + 0], cnt_log, Int32((pos * LAYERS + l) * 4 + 0), Int32(H), Int32(nh[l]), grid_dim=1, block_dim=1024)
                         if ovl and skel and phase == 0:
+                            ks.enqueue_function(k_age, sidx[par * 128 + l * 4 + 0], scnt[par * 128 + l * 4 + 0], ovl_flags, age_hits, Int32((l * 4 + 0) * INTER), Int32(pos + 1000), Int32((pos * LAYERS + l) * 4 + 0), grid_dim=1, block_dim=1)
                             ks.enqueue_function(k_ovl, sidx[par * 128 + l * 4 + 0], scnt[par * 128 + l * 4 + 0], ovl_flags, ovl_hits, Int32((l * 4 + 0) * INTER), Int32(pos + 1000), Int32((pos * LAYERS + l) * 4 + 0), grid_dim=1, block_dim=1)
                     if skel and phase == 0:
                         ks.record_event(ev_sel[l * 4 + 0])
@@ -890,6 +897,7 @@ def main() raises:
                     if (not skel) or phase == 0:
                         ks.enqueue_function(k_sel, attnb16, sidx[par * 128 + l * 4 + 1], scnt[par * 128 + l * 4 + 1], cnt_log, Int32((pos * LAYERS + l) * 4 + 1), Int32(H), Int32(nh[l]), grid_dim=1, block_dim=1024)
                         if ovl and skel and phase == 0:
+                            ks.enqueue_function(k_age, sidx[par * 128 + l * 4 + 1], scnt[par * 128 + l * 4 + 1], ovl_flags, age_hits, Int32((l * 4 + 1) * INTER), Int32(pos + 1000), Int32((pos * LAYERS + l) * 4 + 1), grid_dim=1, block_dim=1)
                             ks.enqueue_function(k_ovl, sidx[par * 128 + l * 4 + 1], scnt[par * 128 + l * 4 + 1], ovl_flags, ovl_hits, Int32((l * 4 + 1) * INTER), Int32(pos + 1000), Int32((pos * LAYERS + l) * 4 + 1), grid_dim=1, block_dim=1)
                     if skel and phase == 0:
                         ks.record_event(ev_sel[l * 4 + 1])
@@ -990,6 +998,7 @@ def main() raises:
                     if (not skel) or phase == 0:
                         ks.enqueue_function(k_sel, hbf16, sidx[par * 128 + l * 4 + 2], scnt[par * 128 + l * 4 + 2], cnt_log, Int32((pos * LAYERS + l) * 4 + 2), Int32(H), Int32(nh[l]), grid_dim=1, block_dim=1024)
                         if ovl and skel and phase == 0:
+                            ks.enqueue_function(k_age, sidx[par * 128 + l * 4 + 2], scnt[par * 128 + l * 4 + 2], ovl_flags, age_hits, Int32((l * 4 + 2) * INTER), Int32(pos + 1000), Int32((pos * LAYERS + l) * 4 + 2), grid_dim=1, block_dim=1)
                             ks.enqueue_function(k_ovl, sidx[par * 128 + l * 4 + 2], scnt[par * 128 + l * 4 + 2], ovl_flags, ovl_hits, Int32((l * 4 + 2) * INTER), Int32(pos + 1000), Int32((pos * LAYERS + l) * 4 + 2), grid_dim=1, block_dim=1)
                     if skel and phase == 0:
                         ks.record_event(ev_sel[l * 4 + 2])
@@ -1085,6 +1094,7 @@ def main() raises:
                     if (not skel) or phase == 0:
                         ks.enqueue_function(k_sel, actb16, sidx[par * 128 + l * 4 + 3], scnt[par * 128 + l * 4 + 3], cnt_log, Int32((pos * LAYERS + l) * 4 + 3), Int32(INTER), Int32(ni[l]), grid_dim=1, block_dim=1024)
                         if ovl and skel and phase == 0:
+                            ks.enqueue_function(k_age, sidx[par * 128 + l * 4 + 3], scnt[par * 128 + l * 4 + 3], ovl_flags, age_hits, Int32((l * 4 + 3) * INTER), Int32(pos + 1000), Int32((pos * LAYERS + l) * 4 + 3), grid_dim=1, block_dim=1)
                             ks.enqueue_function(k_ovl, sidx[par * 128 + l * 4 + 3], scnt[par * 128 + l * 4 + 3], ovl_flags, ovl_hits, Int32((l * 4 + 3) * INTER), Int32(pos + 1000), Int32((pos * LAYERS + l) * 4 + 3), grid_dim=1, block_dim=1)
                     if skel and phase == 0:
                         ks.record_event(ev_sel[l * 4 + 3])
@@ -1249,6 +1259,23 @@ def main() raises:
                     hs += Int(oh[(pos * LAYERS + l) * 4 + jj])
                     cs += Int(oc[(pos * LAYERS + l) * 4 + jj])
             print("MOJO_OVL linear", jj, "previous_token_overlap", Float64(hs) / Float64(cs))
+        var ah = ctx.enqueue_create_host_buffer[DType.int32](steps * LAYERS * 4 * 16)
+        ctx.enqueue_copy(dst_buf=ah, src_buf=age_hits)
+        ctx.synchronize()
+        for jj in range(4):
+            var cum = 0
+            var tot2 = 0
+            for pos in range(1, steps):
+                for l in range(LAYERS):
+                    tot2 += Int(oc[(pos * LAYERS + l) * 4 + jj])
+            var line = String("MOJO_AGE linear ") + String(jj) + String(" cumulative_hit_fraction_by_window")
+            for w in range(16):
+                for pos in range(1, steps):
+                    for l in range(LAYERS):
+                        cum += Int(ah[16 * ((pos * LAYERS + l) * 4 + jj) + w])
+                line += String(" ") + String(w + 1) + String(":") + String(Float64(cum) / Float64(tot2))
+                cum = 0 if False else cum
+            print(line)
         var ph = ctx.enqueue_create_host_buffer[DType.int32](steps * LAYERS * 4 * 2)
         ctx.enqueue_copy(dst_buf=ph, src_buf=prb_hits)
         ctx.synchronize()

@@ -357,3 +357,16 @@ So the skeleton's list misses about 5-11% of the true set, and 2-5 points of tha
 - VRAM is not bounded. The channel-addressed staging buffer is full-plug sized (1.611 GB), the K-major hole copy is about the same again, and the row-major weights are a third copy; measured peak at 35% was 8022 MiB with 910 MiB of desktop use at idle. That fits a 12 GB card for Phi-4-mini but does not scale to a model 5 times larger. PCIe traffic is honestly emulated (a row is re-copied unless its channel was selected on the previous token or earlier on this one), so the speed is a speed with a one-token-lookback cache, but the memory footprint is not that of a bounded cache. A bounded slot cache with eviction is the next step and has not been built.
 - Each token runs two passes (the skeleton, then the real pass) on one GPU, and the demand fetch of missing rows runs on the compute stream, so those rows stall it. Running the skeleton concurrently on a second stream with its own scratch buffers and a one-slot ephemeral K/V is designed but not built.
 - Single 3060, host `Ms-2080`, driver 595.99.02, desktop graphics load present (the idle guard records 26% mean utilization); three repeats on the 35% and 45% arms, not five.
+
+### Multi-token reuse distance of the selected rows, 2026-11-14
+
+`ovl` mode with the age probe (read-only; 512 teacher-forced positions, skeleton selection). For each selected channel, how many tokens ago the same linear last selected it. The table gives the share of selected plug bytes (weighted by row size: qkv 15.6%, o 9.4%, gate+up 50%, down 25%) that were selected within the last W tokens, i.e. the hit rate of a recency window of W tokens with unbounded capacity.
+
+| window W | 35% selection | 45% selection |
+|---|---|---|
+| 1 token (what the fixup arm emulates) | 44.9% | 52.5% |
+| 2 tokens | 64.1% | 73.0% |
+| 4 tokens | 82.7% | 90.0% |
+| 8 tokens | 95.0% | 98.0% |
+
+**Reading.** Reuse extends well past the previous token: a 4-token window would serve about 83% of the 35% arm's gather bytes instead of 45%, cutting fresh PCIe traffic from about 310 MB to about 100 MB per token at 35% (an estimate from these shares, not a run). **What this does not give:** the capacity needed. A window of W tokens holds the union of W selections, which is larger than one token's selection (at most the whole plug). The bounded-cache hit rate for a given VRAM budget, and the eviction policy that achieves it, are not measured here; the window figures are an upper bound on what recency alone can buy. No tracking effect: reusing a row never changes a result.

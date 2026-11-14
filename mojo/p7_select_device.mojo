@@ -343,3 +343,20 @@ def apply_corr_ksc[
         var p = Int((pb >> UInt8(4 * (r & 1))) & UInt8(15))
         acc += (delta[unsafe_offset=h * 16 + p] * scales_k[unsafe_offset=(c >> 6) * nn + r]) * x[unsafe_offset=c].cast[DType.float32]()
     part[unsafe_offset=s * nn + r] = acc
+
+# Reuse-distance probe (read-only, "ovl" mode): for each channel this call selects, the number of tokens since the same linear last selected it
+# (flags hold last-selected position + 1001; stamp = position + 1000, so age = stamp - flag + 1, >= 1). hits[16 * slot + age - 1] += 1 for ages 1..16.
+# Run BEFORE overlap_count, which marks the flags for this token.
+def overlap_age[
+    io: ImmOrigin, co: ImmOrigin, fo: ImmOrigin, ho: MutOrigin
+](idx: ImmPointer[Int32, io], cnt: ImmPointer[Int32, co], flags: ImmPointer[Int32, fo], hits: MutPointer[Int32, ho], off: Int32, stamp: Int32, slot: Int32):
+    if Int(thread_idx.x) != 0:
+        return
+    var n = Int(cnt[unsafe_offset=0])
+    for i in range(n):
+        var f = Int(flags[unsafe_offset=Int(off) + Int(idx[unsafe_offset=i])])
+        if f > 0:
+            var age = Int(stamp) - f + 1
+            if age >= 1 and age <= 16:
+                var k = 16 * Int(slot) + age - 1
+                hits[unsafe_offset=k] = hits[unsafe_offset=k] + 1
