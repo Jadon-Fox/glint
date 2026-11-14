@@ -291,3 +291,17 @@ M6 is still not met on Mojo.
 | 45% | 25.83 | 80.7% | 8.6 | 727 | no |
 
 The 30% arm is the first on Mojo that is at 10 tok/s and within two token positions of the tracking bar, but it does not meet it, and M6 is not accepted. Agreement is not monotone in the fraction (57.0, 82.0, 61.5, 78.4, 80.7), so single arms near the bar are not distinguishable from noise with 12 prompts of 32 tokens; I do not read 30% as better than 40-45%.
+
+### Skeleton + per-layer policy, free-running, 2026-11-14
+
+Base selection with extra channels on the first and last `ends` layers (`ends:endpct`), skeleton + `ksplit` + persistent gather:
+
+| base | ends @ pct | prefix | agreement | tok/s | MB/token | tracks |
+|---|---|---|---|---|---|---|
+| 25% | 4 @ 60 | 20.00 | 69.5% | 9.5 | 545 | no |
+| 25% | 6 @ 50 | 23.83 | 74.5% | 9.6 | 555 | no |
+| 30% | 4 @ 50 | 18.58 | 69.8% | 10.1 | 566 | no |
+| 30% | 2 @ 100 | 23.92 | 75.5% | 9.6 | 626 | no |
+| 20% | 8 @ 50 | 17.25 | 66.7% | 9.5 | 566 | no |
+
+None tracks, all below the 30% uniform skeleton arm (82.0%), as with true selection earlier: spending channels on the end layers does not buy tracking here. No arm meets both bars; M6 is not accepted.
