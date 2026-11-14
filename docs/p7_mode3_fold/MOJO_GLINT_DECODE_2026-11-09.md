@@ -409,3 +409,21 @@ Replaces the full-plug channel-addressed staging buffer with a fixed pool of `ca
 **Reading.** With one resident base layout, the 40% and 45% arms still meet both written criteria and pass the gate, at 6246 MiB peak instead of 8073 MiB. The 35% arm's tracking flips with a change in summation order (83.1% to 82.0%), which confirms it is a noise-limited result sitting on the bar; 40% and 45% are the arms to quote. Rollouts here are one run each, not three.
 
 **Where the remaining VRAM is** (an estimate from the allocations, not a measured split): full-plug staging 1.6 GB, K-major hole and scales 1.8 GB, embedding and logits table 1.2 GB, KV cache 0.54 GB, plus the CUDA context. The 4.5 GiB target is not met: 6246 MiB measured, about 5.3 GiB above the desktop's idle use. Staging is the next large item and needs the layer-ahead skeleton (a few layers of staging instead of 32).
+
+### Layer-ahead ephemeral skeleton with a staging ring (`ahead`), 2026-11-14
+
+**Design.** The skeleton no longer runs the whole model before the real pass. It runs on its own stream (`ss`) with its own scratch buffers (activations, attention partials, GEMV partials) `AHEAD_LAG = 2` layers ahead of the real pass: at host step `s` it enqueues skeleton layer `s` and real layer `s - 2`. The skeleton's only durable output is its channel lists, which it hands to the copy stream `gs`, which stages the plug rows into a ring of `AHEAD_RING = 4` layer slots. The real pass waits per layer for its rows (`ev_pref`), selects its TRUE channels, demand-fetches only rows missing from the slot (a per-slot, per-channel stamp that includes the layer and token, so a reused slot invalidates itself), and corrects exactly as in the exact-miss fixup. Ring slot reuse is guarded by a per-layer "real pass done" event (`ev_ldone`). No shadow K/V is needed: for layer `l` the skeleton writes its K/V at the current position before it selects for the last time, and the real pass overwrites that slot only after waiting on that selection, so the two never touch a layer's cache slot at the same time.
+
+**Numerics.** Bit-identical to the whole-token skeleton with the K-major GEMV: 128 positions, 35%: PPL 74.34960059115652, top-1 120/128 in both. 2047-position gate: 35%: 1988/2047 = 97.12%, PPL 5.4791; 45%: 2004/2047 = 97.90%, PPL 5.4778 (same as `kgemv`). Free-running tracking is therefore the `kgemv` tracking (35%: 82.0%, 40%: 89.6%, 45%: 84.6%).
+
+**VRAM (sampled over exactly the run; the card is at 769 MiB with the desktop alone):** whole-token skeleton 6040 MiB, layer-ahead **4696 MiB** (1344 MiB lower: full-plug staging 1.6 GB becomes a four-slot ring of about 200 MB). About 3.8 GiB is attributable to the decoder; the card total is 4.59 GiB.
+
+**Speed.** The ring drops cross-token row reuse, so every selected row is re-fetched each token (35%: 566 MB against about 310 MB). Whole-token 79.5 ms per token against 86.7 ms (128 positions, same run).
+
+| selection | prefix | agreement | rollout tok/s | gate tok/s | both criteria |
+|---|---|---|---|---|---|
+| 35% | 23.83 | 82.0% | 11.46 | 11.26 | no (agreement 0.5 under the bar) |
+| 40% | 24.08 | 89.6% | **10.65** | not run | **yes** |
+| 45% | 25.33 | 84.6% | 9.72 | 9.78 | no (speed: the 727 MB fetch per token now limits it) |
+
+**Reading.** At a 4.7 GiB card peak (3.8 GiB attributable) the 40% arm meets both written criteria (tracks at 89.6%, 10.65 tok/s, one run) and passes the gate. 45% tracks but drops under 10 tok/s because it now re-fetches 727 MB every token; a bounded multi-token row cache (the reuse-distance probe says a 4-token window would serve about 90% of bytes at 45%) is the tier that would restore its speed, and is not built. Rollouts here are one run each. The skeleton still costs a second compute pass per token; it is now concurrent with the real pass on the same GPU, and the speed shows the overlap is partial, not complete.
