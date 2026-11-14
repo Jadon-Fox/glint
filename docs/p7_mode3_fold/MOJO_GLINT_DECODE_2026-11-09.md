@@ -328,3 +328,32 @@ Reuse is well above chance (2.3 to 4.5 times at 10%), so a one-token-lookback ro
 | 50% | 91.6% | 95.1% | 91.6% | 89.4% | +2.4 to 5.3 points |
 
 So the skeleton's list misses about 5-11% of the true set, and 2-5 points of that were selected on the previous token. An exact-miss fixup (the real pass selects its true list, fetches only the rows neither the skeleton nor the previous token supplied, and corrects with the true list) would run the true-selection numerics, which tracked at 50% (92.7%), with a demand fetch of only a few percent of the selected rows. That arm is not built. The speed estimate (not a measurement): the 45% skeleton arm spends about 86 ms in the real pass and about 30 ms in the same-GPU skeleton; with the skeleton overlapped on a second GPU or stream the 45-50% arms would be near 10 tok/s.
+
+### Exact-miss fixup, and the GEMV occupancy fix that made it fast, 2026-11-14
+
+**Exact-miss fixup (`skel+ksplit+fix`).** Phase 0 (the fold-only skeleton) picks channels per linear and prefetches their plug rows on a second stream into channel-addressed staging, skipping rows still resident from the previous token. Phase 1 (the real pass) selects its TRUE channels from the real activation, demand-fetches only the rows neither the skeleton nor the previous token supplied, and corrects with the true list. Its numerics are bit-identical to plain same-token selection with `ksplit` (128 positions: PPL 73.72424813954396 at 30% and 74.89961445413581 at 50%, equal to the non-skeleton controls), so its tracking is the tracking of true selection, not of the skeleton's guesses.
+
+**Where the time went (timing-only class ablations on fold-only, 128 positions, results invalid by design).** Baseline 32.9 ms per token. Skipping the GEMVs: 5.5 ms (the GEMVs are 27.4 ms, 83%). Skipping logits and CE: 28.4 ms. Skipping attention: 32.3 ms. Skipping norms, residual and SwiGLU: 33.0 ms. Skipping everything: 0.22 ms. Host enqueue of a fold-only token is 0.9 ms against 38 ms measured, so the cost was GPU-side. 27 ms for about 1.8 GB of weights is about 66 GB/s, roughly 18% of the 3060's bandwidth.
+
+**Two kernel changes, both bit-identical in output** (fold-only PPL 87.09321242490202, top-1 102/128 before and after; 30% fixup PPL 73.72424813954396, 35% PPL 73.70571527978859):
+1. Parent-only table lookup: the index `h * 16` put every lane of a warp on bank 0 or 16 (16-way shared-memory conflicts). A per-lane replica of the 16 parent values (`tabr[h * 32 + lane]`) removes them. Fold-only 32.9 to 30.2 ms.
+2. Occupancy: the activation vector was staged in a fixed 8192-float shared buffer even for K = 3072. Sizing it to the call's K (`KD`) lets several times more warps run per SM for the qkv, o and gate/up GEMVs (75% of the weights; down keeps K = 8192). Fold-only 30.2 to 21.4 ms (46.7 tok/s).
+
+**Free-running rollout (Amendment 3 protocol, against the full-plug arm), three runs each, identical tokens every run:**
+
+| selection | prefix | agreement | tok/s, three runs | median | MB/token (gathered, emulation) |
+|---|---|---|---|---|---|
+| 35% | 24.83 | 83.1% | 10.85, 12.53, 12.18 | 12.18 | 566 |
+| 40% | 26.42 | 84.6% | 10.27 (one run) | | 646 |
+| 45% | 27.83 | 92.4% | 11.38, 11.81, 12.06 | 11.81 | 727 |
+
+**Recorded teacher-forced gate, 2047 positions** (top-1 >= 95.0%, PPL within 2% of 5.486957): 35%: 1991/2047 = 97.26%, PPL 5.4717 (-0.28%), 11.9 tok/s; 45%: 2000/2047 = 97.70%, PPL 5.4753 (-0.20%), 11.3 tok/s. Both pass.
+
+**Reading.** As written (Amendment 3: matched prefix >= 20.0 and agreement >= 82.5%, and >= 10 tok/s), the 35% and 45% arms meet both in the same arm in every run, and pass the recorded gate. Whether that is M6 acceptance is the operator's call.
+
+**What this does not establish (caveats, several raised in an independent review of this code):**
+- The Amendment-3 numbers were written by the agent and are not ratified. The rollout is 12 prompts of 32 tokens; the 35% margin over the bar is 0.6 points (2 token positions), and agreement was not monotone in the fraction in earlier arms, so the 35% result alone is thin. 45% passes by 9.9 points.
+- Rollout contexts are at most 95 positions. The 2047-position gate runs report 11.3-11.9 tok/s averaged over the full context range.
+- VRAM is not bounded. The channel-addressed staging buffer is full-plug sized (1.611 GB), the K-major hole copy is about the same again, and the row-major weights are a third copy; measured peak at 35% was 8022 MiB with 910 MiB of desktop use at idle. That fits a 12 GB card for Phi-4-mini but does not scale to a model 5 times larger. PCIe traffic is honestly emulated (a row is re-copied unless its channel was selected on the previous token or earlier on this one), so the speed is a speed with a one-token-lookback cache, but the memory footprint is not that of a bounded cache. A bounded slot cache with eviction is the next step and has not been built.
+- Each token runs two passes (the skeleton, then the real pass) on one GPU, and the demand fetch of missing rows runs on the compute stream, so those rows stall it. Running the skeleton concurrently on a second stream with its own scratch buffers and a one-slot ephemeral K/V is designed but not built.
+- Single 3060, host `Ms-2080`, driver 595.99.02, desktop graphics load present (the idle guard records 26% mean utilization); three repeats on the 35% and 45% arms, not five.

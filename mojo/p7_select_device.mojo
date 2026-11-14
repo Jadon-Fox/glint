@@ -280,3 +280,66 @@ def overlap_probe[
             b += 1
     hits[unsafe_offset=2 * Int(slot)] = Int32(a)
     hits[unsafe_offset=2 * Int(slot) + 1] = Int32(b)
+
+# Exact-miss fixup ("fix" mode). Channel-addressed staging: the plug row of channel c lives at stage[c * rowwords], so any selection list can
+# read it. A row is copied only if the channel was not selected on the previous token or earlier on this one (flags[off + c] < stamp, with
+# stamp = position + 1000); the call then marks it (flags = stamp + 1). Plug rows never change, so a skipped row is still valid in the staging
+# buffer; the flag only emulates a one-token-lookback cache. Persistent grid of GB blocks, same as gather_rows_p4.
+def gather_rows_fix[
+    po: ImmOrigin, io: ImmOrigin, co: ImmOrigin, so: MutOrigin, fo: MutOrigin
+](plugk: ImmPointer[UInt32, po], idx: ImmPointer[Int32, io], cnt: ImmPointer[Int32, co], stage: MutPointer[UInt32, so], flags: MutPointer[Int32, fo], rowwords: Int32, off: Int32, stamp: Int32):
+    var rw = Int(rowwords)
+    var n = Int(cnt[unsafe_offset=0])
+    var tid = Int(thread_idx.x)
+    var need = stack_allocation[1, Int32, address_space=AddressSpace.SHARED]()
+    for i in range(Int(block_idx.x), n, GB):
+        var c = Int(idx[unsafe_offset=i])
+        if tid == 0:
+            var f = flags[unsafe_offset=Int(off) + c]
+            if f < stamp:
+                need[unsafe_offset=0] = 1
+            else:
+                need[unsafe_offset=0] = 0
+            flags[unsafe_offset=Int(off) + c] = stamp + 1
+        barrier()
+        if need[unsafe_offset=0] != 0:
+            var base = c * rw
+            for w4 in range(tid, rw // 4, 128):
+                var v = plugk.unsafe_offset(base + 4 * w4).load[width=4, alignment=16]()
+                stage.unsafe_offset(base + 4 * w4).store[alignment=16](v)
+        barrier()
+
+# apply_corr_ks reading channel-addressed staging: stage[c * (n / 2) + r / 2] instead of stage[i * (n / 2) + r / 2].
+def apply_corr_ksc[
+    ho: ImmOrigin, so: ImmOrigin, dt: ImmOrigin, xo: ImmOrigin, io: ImmOrigin, go: ImmOrigin, co: ImmOrigin, po: MutOrigin
+](
+    hole_k: ImmPointer[UInt8, ho],
+    scales_k: ImmPointer[Float32, so],
+    delta: ImmPointer[Float32, dt],
+    x: ImmPointer[BFloat16, xo],
+    idx: ImmPointer[Int32, io],
+    stage: ImmPointer[UInt8, go],
+    cnt: ImmPointer[Int32, co],
+    part: MutPointer[Float32, po],
+    n: Int32, kdim: Int32,
+):
+    var r = global_idx.x
+    if r >= Int(n):
+        return
+    var s = Int(block_idx.y)
+    var nn = Int(n)
+    var half = nn // 2
+    var cn = Int(cnt[unsafe_offset=0])
+    var chunk = (cn + KS - 1) // KS
+    var lo = s * chunk
+    var hi = lo + chunk
+    if hi > cn:
+        hi = cn
+    var acc = Float32(0)
+    for i in range(lo, hi):
+        var c = Int(idx[unsafe_offset=i])
+        var h = Int((hole_k[unsafe_offset=c * half + (r >> 1)] >> UInt8(4 * (r & 1))) & UInt8(15))
+        var pb = stage[unsafe_offset=c * half + (r >> 1)]
+        var p = Int((pb >> UInt8(4 * (r & 1))) & UInt8(15))
+        acc += (delta[unsafe_offset=h * 16 + p] * scales_k[unsafe_offset=(c >> 6) * nn + r]) * x[unsafe_offset=c].cast[DType.float32]()
+    part[unsafe_offset=s * nn + r] = acc

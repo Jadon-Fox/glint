@@ -5,7 +5,8 @@
 # 16x16 table sits in shared memory. The summation ORDER differs from the old kernel (chunk-wise per lane), so
 # outputs are not bit-identical to it; they must be re-validated on the recorded gate.
 # use_plug = False skips the plug read (for a parent-only table where every column of a row is the same value).
-# Requires K % 32 == 0 and K <= 8192; N % 2 == 0.
+# Requires K % 32 == 0 and K <= KD (KD = the exact K of the call: the activation vector is staged in KD + KD / 32 floats of shared memory,
+# so a smaller K leaves room for more resident blocks per SM); N % 2 == 0.
 from std.gpu import thread_idx, block_idx
 from std.memory import stack_allocation
 from max.gpu.sync import barrier
@@ -16,6 +17,7 @@ comptime XS_PAD = KMAX + KMAX // 32
 
 def glint_gemv_fast[
     use_plug: Bool,
+    KD: Int,
     ho: ImmOrigin, po: ImmOrigin, so: ImmOrigin, to: ImmOrigin, xo: ImmOrigin, yo: MutOrigin
 ](
     hole: ImmPointer[UInt32, ho],
@@ -31,9 +33,15 @@ def glint_gemv_fast[
     var warp = tid >> 5
     var row = block_idx.x * 4 + warp
     var kk = Int(kdim)
-    var xs = stack_allocation[XS_PAD, Float32, address_space=AddressSpace.SHARED]()
+    var xs = stack_allocation[KD + KD // 32, Float32, address_space=AddressSpace.SHARED]()
     var tab = stack_allocation[256, Float32, address_space=AddressSpace.SHARED]()
     var red = stack_allocation[128, Float32, address_space=AddressSpace.SHARED]()
+    # Parent-only path (use_plug = False): the table index is h * 16, so a single shared copy puts every lane on bank 0 or 16 (16-way
+    # conflicts on every weight). Keep the 16 parent values once per lane instead, tabr[h * 32 + lane], so each lane reads its own bank.
+    var tabr = stack_allocation[512, Float32, address_space=AddressSpace.SHARED]()
+    comptime if not use_plug:
+        for i in range(tid, 512, 128):
+            tabr[unsafe_offset=i] = cells[unsafe_offset=(i // 32) * 16]
     for i in range(tid, kk, 128):
         xs[unsafe_offset=i + i // 32] = x[unsafe_offset=i].cast[DType.float32]()
     tab[unsafe_offset=tid] = cells[unsafe_offset=tid]
@@ -58,7 +66,10 @@ def glint_gemv_fast[
                     var p = 0
                     comptime if use_plug:
                         p = Int((pw >> sh) & UInt32(15))
-                    acc += (tab[unsafe_offset=h * 16 + p] * sc) * xs[unsafe_offset=xb + wi * 8 + q]
+                    comptime if use_plug:
+                        acc += (tab[unsafe_offset=h * 16 + p] * sc) * xs[unsafe_offset=xb + wi * 8 + q]
+                    else:
+                        acc += (tabr[unsafe_offset=h * 32 + Int(lane)] * sc) * xs[unsafe_offset=xb + wi * 8 + q]
     red[unsafe_offset=tid] = acc
     barrier()
     if lane == 0 and row < Int(n):

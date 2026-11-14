@@ -72,8 +72,8 @@ def main() raises:
     ctx.synchronize()
 
     var k_old = ctx.compile_function[glint_gemv_warp[ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
-    var k_new = ctx.compile_function[glint_gemv_fast[True, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
-    var k_newp = ctx.compile_function[glint_gemv_fast[False, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
+    var k_new = ctx.compile_function[glint_gemv_fast[True, 8192, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
+    var k_newp = ctx.compile_function[glint_gemv_fast[False, 8192, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
 
     var names = List[String]()
     var ns = List[Int]()
