@@ -270,3 +270,24 @@ M6 is still not met on Mojo.
 | 50% | 22.50 | 70.3% | 5.2 | 807 | 27.92 | 92.7% | 4.7 |
 
 **Reading.** The skeleton's channels track about as well as true selection at 10-30% (30%: prefix 26.25 passes the 20.0 bar, agreement 82.0% misses 82.5% by 0.5 points) and worse at 50%. The results are not monotone in the fraction, which shows how noisy 12 prompts of 32 greedy tokens are, so the 30% advantage over true selection is not a finding. It is faster at 30% (7.2 against 5.9 tok/s) because the gather hides behind the skeleton and the real pass. M6 is still unmet: the nearest arm is 30% at 7.2 tok/s and 0.5 points under the agreement bar. The skeleton runs on the same GPU here and costs about 30 ms per token (fold-only alone is 33 tok/s); moving it to a second GPU removes that from the critical path, which for the 30% arm is an estimate of about 108 ms per token (9.3 tok/s), not a measurement.
+
+### Skeleton gather on a small persistent grid, 2026-11-14
+
+**Finding.** The skeleton arm at 30% selection ran at 137 ms per token, far above the 108 ms its parts predicted. The gather kernel launched one block per candidate row (3072-8192 blocks per linear), so for the 43 ms the 485 MB takes over PCIe the copy kept the SMs busy and starved the compute kernels running beside it. `gather_rows_p4` moves the same bytes with a fixed grid of 16 blocks (`GB`), each looping over the selected rows. Same data movement and staging layout; PCIe-bound copies need few SMs. Widening the correction split from 8 to 32 chunks changed nothing (137 ms), so the correction was not the cost.
+
+| 128 teacher-forced positions | before (one block per row) | after (16 blocks) |
+|---|---|---|
+| skeleton 30% | 136.8 ms/token, 7.3 tok/s | **91.7 ms/token, 10.9 tok/s** (PPL 73.86, top-1 118/128) |
+| skeleton 10% | 95.9 ms/token | 78.5 ms/token, 12.7 tok/s (PPL 71.32, top-1 116/128) |
+
+**Free-running (Amendment 3 protocol, against the full-plug arm), skeleton + `ksplit` + persistent gather:**
+
+| selection | prefix | agreement | tok/s | MB/token | tracks |
+|---|---|---|---|---|---|
+| 25% | 15.92 | 57.0% | 11.2 | 404 | no |
+| **30%** | 26.25 | **82.0%** | **10.8** | 485 | no: 315 of 384 positions, the bar needs 317 |
+| 35% | 15.83 | 61.5% | 9.7 | 566 | no |
+| 40% | 25.08 | 78.4% | 9.7 | 646 | no |
+| 45% | 25.83 | 80.7% | 8.6 | 727 | no |
+
+The 30% arm is the first on Mojo that is at 10 tok/s and within two token positions of the tracking bar, but it does not meet it, and M6 is not accepted. Agreement is not monotone in the fraction (57.0, 82.0, 61.5, 78.4, 80.7), so single arms near the bar are not distinguishable from noise with 12 prompts of 32 tokens; I do not read 30% as better than 40-45%.

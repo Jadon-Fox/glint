@@ -230,3 +230,18 @@ def accum_hist[
     for i in range(Int(thread_idx.x), n, 128):
         var c = Int(off) + Int(idx[unsafe_offset=i])
         hist[unsafe_offset=c] = hist[unsafe_offset=c] + 1
+
+# Persistent-grid variant of gather_rows_d4 for the skeleton prefetch: a fixed small grid (GB blocks) loops over the selected rows, so a
+# PCIe-bound gather occupies few SMs and the compute kernels running alongside are not starved. Same data movement and staging layout.
+comptime GB = 16
+def gather_rows_p4[
+    po: ImmOrigin, io: ImmOrigin, co: ImmOrigin, so: MutOrigin
+](plugk: ImmPointer[UInt32, po], idx: ImmPointer[Int32, io], cnt: ImmPointer[Int32, co], stage: MutPointer[UInt32, so], rowwords: Int32):
+    var rw = Int(rowwords)
+    var n = Int(cnt[unsafe_offset=0])
+    for i in range(Int(block_idx.x), n, GB):
+        var src = Int(idx[unsafe_offset=i]) * rw
+        var dst = i * rw
+        for w4 in range(Int(thread_idx.x), rw // 4, 128):
+            var v = plugk.unsafe_offset(src + 4 * w4).load[width=4, alignment=16]()
+            stage.unsafe_offset(dst + 4 * w4).store[alignment=16](v)
