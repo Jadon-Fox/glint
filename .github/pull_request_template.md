@@ -3,7 +3,7 @@ DRAFT v6.1. Lives in /workspace/org-keeper/routing-standard-2026-11-10/v6.1/.
 Do not install until Jadon has seen it. v1–v6 are left untouched.
 Headings match the issue form so one parser can read both.
 HANID is not a routable project (retiring: no new routing).
-Project 6 uses a placeholder name; the board is not renamed.
+Project 6 is Project 6 — GLINT.
 MMLRPV parts are the six component repos (plus umbrella). See MMLRPV-PARTS-CANDIDATES.md.
 The four §3.2a boards (user#10–#13) are listed after create + readback (H1).
 -->
@@ -12,8 +12,7 @@ The four §3.2a boards (user#10–#13) are listed after create + readback (H1).
 <!-- Replace the line below with exactly one of:
 LLMVE
 MMLRPV
-Project 6 (name pending from Jadon)
-Pipeline (corpus → BigQuery → MERCS)
+Project 6 — GLINT
 Multi-agent memory consolidation
 HSVE
 HSVE diagnostic memory database
@@ -32,4 +31,3 @@ _unspecified_
 N/A — project is not MMLRPV
 
 ### Summary
-

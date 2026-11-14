@@ -58,6 +58,8 @@ jobs:
             const known = [
               'LLMVE',
               'MMLRPV',
+              'Project 6 — GLINT',
+              'GLINT',
               'Project 6 (name pending from Jadon)',
               'Pipeline (corpus → BigQuery → MERCS)',
               'Multi-agent memory consolidation',

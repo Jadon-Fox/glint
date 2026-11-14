@@ -1,8 +1,14 @@
-# GLINT — conceptual architecture (not “4+4 quantization”)
-# Court: /home/workspace/glint/ (implementation) · concept SSOT this file · card: lookup/cards/glint-concept.md
-# Source: /home/jfox/Documents/The canonicalization.md (operator, 2026-09-24). Not meaning-court.
+# GLINT — Project 6 conceptual architecture (not “4+4 quantization”)
+# Project: GitHub Project 6 (`https://github.com/users/Jadon-Fox/projects/6`) · Court: `/home/workspace/fractal-deployment/glint/` (implementation) · concept SSOT this file · card: `lookup/cards/glint-concept.md`
+# Source: `/home/jfox/Documents/The canonicalization.md` (operator, 2026-09-24) + operator architectural restatement (2026-11-14). Not meaning-court.
 
-## Canonical concept (designed)
+## Operator Core Architecture (Project 6 — GLINT)
+
+**GLINT (Project 6)** is the operator's quantization and streaming execution architecture that holds weights in **system RAM** and pairs **MLIR prefetch** with an **asynchronous thought pattern for the LLM** so execution runs at **GPU speed** and speed reduction is **not bounded by the physical PCIe lanes**.
+
+*(Boundary & naming lock: GLINT is **Project 6** (`users/Jadon-Fox/projects/6`). Legacy `p7_*` / `"Project 7"` filenames and issue prefixes in this repository are historical mislabels from October 2026 board numbering and must never be conflated with MMLRPV Project 5 or former Board 7 `corpus → BigQuery → MERCS`.)*
+
+## Canonical fold/unfold mechanism (designed)
 
 \[
 \boxed{\text{fold/compress}\rightarrow\text{unfold}\rightarrow\text{conditional relational refinement}}
@@ -26,9 +32,9 @@ Can activation-derived routing identify a bounded high-fidelity subset that trac
 
 ## Truth states
 
-- **Designed:** selective fold → unfold → conditional refinement under a moving budget (this file).
-- **Implemented:** whatever `/home/workspace/glint/` currently builds (often narrower; historically contaminated with “unusual 8-bit quantization” readings).
-- **Demonstrated:** only what lakes / measured runs show. Latency-neutral selective unfolding is not demonstrated by design alone.
+- **Designed:** system RAM residency + MLIR prefetch + asynchronous LLM thought pattern operating at GPU speed unbounded by PCIe lanes, realized over selective fold → unfold → conditional refinement under a moving VRAM budget (this file).
+- **Implemented:** whatever `/home/workspace/fractal-deployment/glint/` currently builds (narrower tip: Gaussian Location INside Tile 4-bit plug, H-TILE / INT8 MMA kernels, and 2-slot Mojo/CUDA `DeviceStream` ring prefetch; historically contaminated with “unusual 8-bit quantization” or generic “matmul acceleration” readings).
+- **Demonstrated:** only what lakes / measured runs on device show. Latency-neutral selective unfolding and full asynchronous thought-pattern overlap are not demonstrated by design alone.
 
 ## Jurisdiction
 

@@ -20,12 +20,11 @@ body:
     id: project
     attributes:
       label: Project
-      description: Which project this work falls under. Required. HANID is omitted on purpose (retiring; no new routing). Project 6's public name is a placeholder; the board is not renamed. The four §3.2a boards (user#10–#13) are included after create + readback.
+      description: Which project this work falls under. Required. HANID is omitted on purpose (retiring; no new routing). Project 6 is Project 6 — GLINT. The four §3.2a boards (user#10–#13) are included after create + readback.
       options:
         - LLMVE
         - MMLRPV
-        - Project 6 (name pending from Jadon)
-        - Pipeline (corpus → BigQuery → MERCS)
+        - Project 6 — GLINT
         - Multi-agent memory consolidation
         - HSVE
         - HSVE diagnostic memory database

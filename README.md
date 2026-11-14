@@ -1,5 +1,6 @@
-# GLINT
-**Concept SSOT (operator 2026-09-24):** [`CONCEPT_CANONICAL_2026-09-24.md`](CONCEPT_CANONICAL_2026-09-24.md) — fold/compress → unfold → conditional relational refinement. Card: `/home/workspace/lookup/cards/glint-concept.md`.
+# GLINT (Project 6)
+**Project Board:** [`users/Jadon-Fox/projects/6`](https://github.com/users/Jadon-Fox/projects/6) *(Note: legacy `p7_*` filenames/symbols in this repo are historical mislabels; GLINT is **Project 6**, distinct from MMLRPV Project 5 / former Board 7).*  
+**Concept SSOT (operator 2026-09-24 / 2026-11-14):** [`CONCEPT_CANONICAL_2026-09-24.md`](CONCEPT_CANONICAL_2026-09-24.md) — **system RAM weight residency + MLIR prefetch + an asynchronous thought pattern for the LLM** so execution runs at **GPU speed** without speed reduction bounded by **PCIe lanes** (`fold/compress → unfold → conditional relational refinement`). Card: `/home/workspace/lookup/cards/glint-concept.md`.
 
 **Current repository tip (implemented, narrower):**
 **Gaussian Location INside Tile.**

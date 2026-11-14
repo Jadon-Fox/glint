@@ -99,9 +99,11 @@ jobs:
             const boards = {
               'LLMVE': 'https://github.com/users/Jadon-Fox/projects/4',
               'MMLRPV': 'https://github.com/users/Jadon-Fox/projects/5',
+              'Project 6 — GLINT': 'https://github.com/users/Jadon-Fox/projects/6',
+              'GLINT': 'https://github.com/users/Jadon-Fox/projects/6',
               'Project 6 (name pending from Jadon)': 'https://github.com/users/Jadon-Fox/projects/6',
               'P7 fold (glint / bf16-to-int8)': 'https://github.com/users/Jadon-Fox/projects/6',
-              'Pipeline (corpus → BigQuery → MERCS)': 'https://github.com/users/Jadon-Fox/projects/7',
+              'Pipeline (corpus → BigQuery → MERCS)': 'https://github.com/users/Jadon-Fox/projects/5',
               'Multi-agent memory consolidation': 'https://github.com/users/Jadon-Fox/projects/9',
               'HSVE': 'https://github.com/orgs/Fractal-Deployment/projects/6',
               // Charter §3.2a boards, created 10 November 2026 (rollout steps 1 and 2c).
@@ -118,6 +120,7 @@ jobs:
             // Recognized only when reading a previous body, so a MOVE off #8
             // can un-link once ROUTING_MOVE_ENABLED is on and Jadon confirms (G3 OPEN).
             const retiringBoards = {
+              'Pipeline (corpus → BigQuery → MERCS)': 'https://github.com/users/Jadon-Fox/projects/7',
               'HANID & definitions': 'https://github.com/users/Jadon-Fox/projects/8',
               'HANID': 'https://github.com/users/Jadon-Fox/projects/8'
             };
