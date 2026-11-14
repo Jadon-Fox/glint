@@ -305,3 +305,26 @@ Base selection with extra channels on the first and last `ends` layers (`ends:en
 | 20% | 8 @ 50 | 17.25 | 66.7% | 9.5 | 566 | no |
 
 None tracks, all below the 30% uniform skeleton arm (82.0%), as with true selection earlier: spending channels on the end layers does not buy tracking here. No arm meets both bars; M6 is not accepted.
+
+### Selection overlap: recency and skeleton coverage of the true selection, 2026-11-14
+
+`ovl` mode (read-only; 512 teacher-forced positions, skeleton selection). Chance level for token-to-token overlap equals the selected fraction.
+
+**Previous-token reuse (an H2O-style recency set).** Share of this token's selected channels that the same linear selected on the previous token:
+
+| selection | qkv | o | gate+up | down | bytes-weighted | chance |
+|---|---|---|---|---|---|---|
+| 10% | 25.1% | 44.5% | 22.6% | 27.4% | ~27% | 10% |
+| 30% | 38.3% | 60.0% | 37.9% | 42.3% | ~41% | 30% |
+| 50% | 54.1% | 70.7% | 54.0% | 57.1% | ~56% | 50% |
+
+Reuse is well above chance (2.3 to 4.5 times at 10%), so a one-token-lookback row cache would skip about 41% of the 30% arm's gather bytes and 56% of the 50% arm's. Plug rows never change, so reusing a row cannot change any result; it only reduces traffic. It therefore does not by itself move tracking.
+
+**Skeleton coverage of the true selection.** Share of the channels the REAL activation would select (same rule, same fraction) that the skeleton's list already contains:
+
+| selection | qkv | o | gate+up | down | previous-token-only extra |
+|---|---|---|---|---|---|
+| 30% | 90.4% | 94.2% | 90.4% | 88.6% | +2.2 to 3.8 points |
+| 50% | 91.6% | 95.1% | 91.6% | 89.4% | +2.4 to 5.3 points |
+
+So the skeleton's list misses about 5-11% of the true set, and 2-5 points of that were selected on the previous token. An exact-miss fixup (the real pass selects its true list, fetches only the rows neither the skeleton nor the previous token supplied, and corrects with the true list) would run the true-selection numerics, which tracked at 50% (92.7%), with a demand fetch of only a few percent of the selected rows. That arm is not built. The speed estimate (not a measurement): the 45% skeleton arm spends about 86 ms in the real pass and about 30 ms in the same-GPU skeleton; with the skeleton overlapped on a second GPU or stream the 45-50% arms would be near 10 tok/s.

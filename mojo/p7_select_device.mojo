@@ -245,3 +245,38 @@ def gather_rows_p4[
         for w4 in range(Int(thread_idx.x), rw // 4, 128):
             var v = plugk.unsafe_offset(src + 4 * w4).load[width=4, alignment=16]()
             stage.unsafe_offset(dst + 4 * w4).store[alignment=16](v)
+
+# Token-to-token selection overlap (read-only diagnostic, "ovl" mode): counts how many of this call's selected channels were also selected
+# by the same linear on the previous token (stamp = position + 1000; the flag array holds the stamp of the last selection of each channel).
+def overlap_count[
+    io: ImmOrigin, co: ImmOrigin, fo: MutOrigin, ho: MutOrigin
+](idx: ImmPointer[Int32, io], cnt: ImmPointer[Int32, co], flags: MutPointer[Int32, fo], hits: MutPointer[Int32, ho], off: Int32, stamp: Int32, slot: Int32):
+    if Int(thread_idx.x) != 0:
+        return
+    var n = Int(cnt[unsafe_offset=0])
+    var h = 0
+    for i in range(n):
+        var c = Int(off) + Int(idx[unsafe_offset=i])
+        if flags[unsafe_offset=c] == stamp:
+            h += 1
+        flags[unsafe_offset=c] = stamp + 1
+    hits[unsafe_offset=Int(slot)] = Int32(h)
+
+# Coverage probe (read-only, "ovl" mode): of the channels the REAL activation selects (idx), how many were selected by the skeleton on this
+# token (flags == stamp + 1) and how many only on the previous token (flags == stamp). Does not modify flags. hits[2 * slot + {0, 1}].
+def overlap_probe[
+    io: ImmOrigin, co: ImmOrigin, fo: ImmOrigin, ho: MutOrigin
+](idx: ImmPointer[Int32, io], cnt: ImmPointer[Int32, co], flags: ImmPointer[Int32, fo], hits: MutPointer[Int32, ho], off: Int32, stamp: Int32, slot: Int32):
+    if Int(thread_idx.x) != 0:
+        return
+    var n = Int(cnt[unsafe_offset=0])
+    var a = 0
+    var b = 0
+    for i in range(n):
+        var f = flags[unsafe_offset=Int(off) + Int(idx[unsafe_offset=i])]
+        if f == stamp + 1:
+            a += 1
+        elif f == stamp:
+            b += 1
+    hits[unsafe_offset=2 * Int(slot)] = Int32(a)
+    hits[unsafe_offset=2 * Int(slot) + 1] = Int32(b)
