@@ -360,3 +360,157 @@ def overlap_age[
             if age >= 1 and age <= 16:
                 var k = 16 * Int(slot) + age - 1
                 hits[unsafe_offset=k] = hits[unsafe_offset=k] + 1
+
+# ---- Bounded row pool ("pool" mode) ----------------------------------------------------------------------------------------------------
+# Replaces the full-plug channel-addressed staging buffer with CAP rows per linear. slot_of[c] is the pool slot holding channel c's plug row (or -1),
+# slot_chan[s] the channel in slot s (or -1), stamp[s] the last token (position + 1) that used slot s. A row stays resident across tokens until its
+# slot is reused for a newer channel; a slot is reusable only if the current token has not used it (stamp < cur), so rows of the current
+# selection are never evicted. Three single-purpose kernels per list: lookup (mark hits, compact the misses), free (compact the reusable
+# slots), assign (give each miss a free slot and copy its row from host memory).
+
+# One block of SB threads. Hits refresh their slot's stamp; misses are compacted into miss_idx in list order. log[slot] = number of misses.
+def pool_lookup[
+    io: ImmOrigin, co: ImmOrigin, so: ImmOrigin, to: MutOrigin, mo: MutOrigin, no: MutOrigin, lo: MutOrigin
+](idx: ImmPointer[Int32, io], cnt: ImmPointer[Int32, co], slot_of: ImmPointer[Int32, so], stamp: MutPointer[Int32, to],
+  miss_idx: MutPointer[Int32, mo], miss_cnt: MutPointer[Int32, no], log: MutPointer[Int32, lo], cur: Int32, slot: Int32):
+    var tid = Int(thread_idx.x)
+    var n = Int(cnt[unsafe_offset=0])
+    var per = (n + SB - 1) // SB
+    var lo_i = tid * per
+    var hi_i = lo_i + per
+    if hi_i > n:
+        hi_i = n
+    var red = stack_allocation[SB, Int32, address_space=AddressSpace.SHARED]()
+    var m = 0
+    for i in range(lo_i, hi_i):
+        var c = Int(idx[unsafe_offset=i])
+        var s = Int(slot_of[unsafe_offset=c])
+        if s >= 0:
+            stamp[unsafe_offset=s] = cur
+        else:
+            m += 1
+    red[unsafe_offset=tid] = Int32(m)
+    barrier()
+    comptime for step in range(10):
+        comptime off = 1 << step
+        var v = Int32(0)
+        if tid >= off:
+            v = red[unsafe_offset=tid - off]
+        barrier()
+        red[unsafe_offset=tid] = red[unsafe_offset=tid] + v
+        barrier()
+    var pos = Int(red[unsafe_offset=tid]) - m
+    for i in range(lo_i, hi_i):
+        var c = Int(idx[unsafe_offset=i])
+        if Int(slot_of[unsafe_offset=c]) < 0:
+            miss_idx[unsafe_offset=pos] = Int32(c)
+            pos += 1
+    if tid == SB - 1:
+        var total = red[unsafe_offset=SB - 1]
+        miss_cnt[unsafe_offset=0] = total
+        log[unsafe_offset=Int(slot)] = total
+
+# One block of SB threads. Compacts the slots with stamp < cur (reusable) into free_idx in ascending slot order.
+def pool_free[
+    to: ImmOrigin, fo: MutOrigin, no: MutOrigin
+](stamp: ImmPointer[Int32, to], cap: Int32, cur: Int32, free_idx: MutPointer[Int32, fo], free_cnt: MutPointer[Int32, no]):
+    var tid = Int(thread_idx.x)
+    var n = Int(cap)
+    var per = (n + SB - 1) // SB
+    var lo_i = tid * per
+    var hi_i = lo_i + per
+    if hi_i > n:
+        hi_i = n
+    var red = stack_allocation[SB, Int32, address_space=AddressSpace.SHARED]()
+    var m = 0
+    for s in range(lo_i, hi_i):
+        if stamp[unsafe_offset=s] < cur:
+            m += 1
+    red[unsafe_offset=tid] = Int32(m)
+    barrier()
+    comptime for step in range(10):
+        comptime off = 1 << step
+        var v = Int32(0)
+        if tid >= off:
+            v = red[unsafe_offset=tid - off]
+        barrier()
+        red[unsafe_offset=tid] = red[unsafe_offset=tid] + v
+        barrier()
+    var pos = Int(red[unsafe_offset=tid]) - m
+    for s in range(lo_i, hi_i):
+        if stamp[unsafe_offset=s] < cur:
+            free_idx[unsafe_offset=pos] = Int32(s)
+            pos += 1
+    if tid == SB - 1:
+        free_cnt[unsafe_offset=0] = red[unsafe_offset=SB - 1]
+
+# GB blocks of 128 threads. Miss j takes free slot j: its previous occupant (if any) is un-mapped, the slot is bound to the new channel, stamped, and
+# the plug row is copied from host memory. A miss with no free slot sets overflow[0] = 1 and is skipped (the run is then invalid; the count is reported).
+def pool_assign[
+    po: ImmOrigin, mo: ImmOrigin, mc: ImmOrigin, fo: ImmOrigin, fc: ImmOrigin,
+    so: MutOrigin, co: MutOrigin, to: MutOrigin, lo: MutOrigin, vo: MutOrigin
+](plugk: ImmPointer[UInt32, po], miss_idx: ImmPointer[Int32, mo], miss_cnt: ImmPointer[Int32, mc],
+  free_idx: ImmPointer[Int32, fo], free_cnt: ImmPointer[Int32, fc],
+  slot_of: MutPointer[Int32, so], slot_chan: MutPointer[Int32, co], stamp: MutPointer[Int32, to],
+  pool: MutPointer[UInt32, lo], overflow: MutPointer[Int32, vo], rowwords: Int32, cur: Int32):
+    var rw = Int(rowwords)
+    var nm = Int(miss_cnt[unsafe_offset=0])
+    var nf = Int(free_cnt[unsafe_offset=0])
+    var tid = Int(thread_idx.x)
+    for j in range(Int(block_idx.x), nm, GB):
+        if j >= nf:
+            if tid == 0:
+                overflow[unsafe_offset=0] = 1
+            continue
+        var c = Int(miss_idx[unsafe_offset=j])
+        var s = Int(free_idx[unsafe_offset=j])
+        if tid == 0:
+            var old = Int(slot_chan[unsafe_offset=s])
+            if old >= 0:
+                slot_of[unsafe_offset=old] = -1
+            slot_chan[unsafe_offset=s] = Int32(c)
+            slot_of[unsafe_offset=c] = Int32(s)
+            stamp[unsafe_offset=s] = cur
+        var src = c * rw
+        var dst = s * rw
+        for w4 in range(tid, rw // 4, 128):
+            var v = plugk.unsafe_offset(src + 4 * w4).load[width=4, alignment=16]()
+            pool.unsafe_offset(dst + 4 * w4).store[alignment=16](v)
+
+# apply_corr_ks reading the slot-indexed pool: the plug row of channel c is pool[slot_of[c] * (n / 2) + r / 2]. Channels without a slot are skipped.
+def apply_corr_ksp[
+    ho: ImmOrigin, so: ImmOrigin, dt: ImmOrigin, xo: ImmOrigin, io: ImmOrigin, go: ImmOrigin, slo: ImmOrigin, co: ImmOrigin, po: MutOrigin
+](
+    hole_k: ImmPointer[UInt8, ho],
+    scales_k: ImmPointer[Float32, so],
+    delta: ImmPointer[Float32, dt],
+    x: ImmPointer[BFloat16, xo],
+    idx: ImmPointer[Int32, io],
+    stage: ImmPointer[UInt8, go],
+    slot_of: ImmPointer[Int32, slo],
+    cnt: ImmPointer[Int32, co],
+    part: MutPointer[Float32, po],
+    n: Int32, kdim: Int32,
+):
+    var r = global_idx.x
+    if r >= Int(n):
+        return
+    var s = Int(block_idx.y)
+    var nn = Int(n)
+    var half = nn // 2
+    var cn = Int(cnt[unsafe_offset=0])
+    var chunk = (cn + KS - 1) // KS
+    var lo = s * chunk
+    var hi = lo + chunk
+    if hi > cn:
+        hi = cn
+    var acc = Float32(0)
+    for i in range(lo, hi):
+        var c = Int(idx[unsafe_offset=i])
+        var sl = Int(slot_of[unsafe_offset=c])
+        if sl >= 0:
+            var h = Int((hole_k[unsafe_offset=c * half + (r >> 1)] >> UInt8(4 * (r & 1))) & UInt8(15))
+            var pb = stage[unsafe_offset=sl * half + (r >> 1)]
+            var p = Int((pb >> UInt8(4 * (r & 1))) & UInt8(15))
+            acc += (delta[unsafe_offset=h * 16 + p] * scales_k[unsafe_offset=(c >> 6) * nn + r]) * x[unsafe_offset=c].cast[DType.float32]()
+    part[unsafe_offset=s * nn + r] = acc

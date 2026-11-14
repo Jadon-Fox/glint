@@ -370,3 +370,15 @@ So the skeleton's list misses about 5-11% of the true set, and 2-5 points of tha
 | 8 tokens | 95.0% | 98.0% |
 
 **Reading.** Reuse extends well past the previous token: a 4-token window would serve about 83% of the 35% arm's gather bytes instead of 45%, cutting fresh PCIe traffic from about 310 MB to about 100 MB per token at 35% (an estimate from these shares, not a run). **What this does not give:** the capacity needed. A window of W tokens holds the union of W selections, which is larger than one token's selection (at most the whole plug). The bounded-cache hit rate for a given VRAM budget, and the eviction policy that achieves it, are not measured here; the window figures are an upper bound on what recency alone can buy. No tracking effect: reusing a row never changes a result.
+
+### Bounded row pool (`pool`, experimental, off by default), 2026-11-14
+
+Replaces the full-plug channel-addressed staging buffer with a fixed pool of `capNN` percent of each linear's rows, a channel-to-slot table, and LRU-like reuse (a slot is reusable only if the current token has not used it; rows stay resident across tokens). Three kernels per list (lookup, free-list, assign) plus a slot-indexed correction kernel.
+
+| 128 positions, 35% selection, skeleton + fixup | pool | VRAM for staging | fresh plug MB/token | tok/s | PPL, top-1 |
+|---|---|---|---|---|---|
+| unbounded (full-plug staging) | none | 1611 MB | about 310 (estimate, 1-token flag emulation) | 11.1 | 73.70571527978859, 122/128 |
+| `pool+cap70` | 70% of rows | 1128 MB | 279.7 | 9.1 | 73.70571527978859, 122/128 (bit-identical), overflow 0 |
+| `pool+cap55` | 55% of rows | 886 MB | 283.4 | 9.0 | 73.34, 120/128: **invalid, overflow 1** (a miss had no free slot) |
+
+**Reading.** The pool is correct at 70% (bit-identical, no overflow) and invalid at 55%. It saves 0.48 GB and costs about 2 tok/s, because it adds about 768 tiny kernels per token (the single-block lookup and free-list scans are on the real pass's critical path). A whole-token skeleton needs the whole token's selected rows resident at once (35% of the plug is 0.56 GB, plus misses), so this design cannot go much below about 0.7 GB however it is tuned. The real staging saving needs the skeleton to run only a few layers ahead of the real pass, so staging is a few layers deep, not 32; that is the ephemeral rolling skeleton and is not built. The `pool` mode is kept for that later work and is not recommended as is.
