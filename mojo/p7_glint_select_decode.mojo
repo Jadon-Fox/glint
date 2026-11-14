@@ -22,6 +22,7 @@ from p7_safetensors import parse_header, STEntry
 from p7_forward import bf16r, embed_gather, rms_norm_bf16, rope, residual_add, swiglu, ce_argmax, read_range
 from p7_glint_linear import glint_gemv_warp
 from p7_glint_gemv_fast import glint_gemv_fast
+from p7_glint_gemv_km import glint_gemv_km, gemv_km_combine, GTB
 from p7_decode_fast_kernels import rms_norm_block, logits_warp, ce_argmax_block
 from p7_attention_split import attention_split_partial, attention_split_combine, NCH
 from p7_select_device import select_topk, gather_rows_d, apply_corr_d, apply_corr_k, transpose_scales, gather_rows_d4, apply_corr_ks, combine_corr, KS, accum_hist, gather_rows_p4, GB, overlap_count, overlap_probe, overlap_age, gather_rows_fix, apply_corr_ksc, pool_lookup, pool_free, pool_assign, apply_corr_ksp
@@ -231,6 +232,7 @@ def main() raises:
     var ovl = False
     var fix = False
     var pool = False
+    var kgemv = False
     var capfrac = 60
     var lyr = False
     var skg = False
@@ -254,6 +256,9 @@ def main() raises:
         ovl = "ovl" in mode
         fix = "fix" in mode
         pool = "pool" in mode
+        kgemv = "kgemv" in mode
+        if kgemv and not kmaj:
+            raise Error("kgemv needs kmaj")
         if pool and not fix:
             raise Error("pool needs fix")
         var mb = mode.as_bytes()
@@ -409,6 +414,9 @@ def main() raises:
 
     var load_t0 = perf_counter_ns()
     var k_tr = ctx.compile_function[transpose_plug[ImmUntrackedOrigin, MutUntrackedOrigin]]()
+    var k_trs0 = ctx.compile_function[transpose_scales[ImmUntrackedOrigin, MutUntrackedOrigin]]()
+    var hk_early = List[type_of(ctx.enqueue_create_buffer[DType.uint8](1))]()
+    var sk_early = List[type_of(ctx.enqueue_create_buffer[DType.float32](1))]()
     var emb_u8 = bf16_from(ctx, "model.embed_tokens.weight", s1_h, s2_h, s1_path, s2_path)
     var fnorm_u8 = bf16_from(ctx, "model.norm.weight", s1_h, s2_h, s1_path, s2_path)
     var in_norm = List[type_of(ctx.enqueue_create_buffer[DType.uint8](1))]()
@@ -437,7 +445,21 @@ def main() raises:
         for j in range(4):
             var nm = "model.layers." + String(l) + "." + names[j] + ".weight"
             var nbytes=nout[j]*kin[j]//2
-            lq.append(load_glint(ctx,nm,nbytes,"U8",pin_h,pin_h2,pin_path,pin_path2))
+            if kgemv:
+                var rm_h = load_glint(ctx,nm,nbytes,"U8",pin_h,pin_h2,pin_path,pin_path2)
+                var rm_s = load_glint(ctx,nm+".absmax",nout[j]*kin[j]//64*4,"F32",pin_h,pin_h2,pin_path,pin_path2)
+                var rm_sv = DeviceBuffer[DType.float32](ctx, rm_s.unsafe_ptr().unsafe_bitcast[Float32](), nout[j] * kin[j] // 64, owning=False)
+                var hb0 = ctx.enqueue_create_buffer[DType.uint8](nbytes)
+                var sb0 = ctx.enqueue_create_buffer[DType.float32](nout[j] * kin[j] // 64)
+                ctx.enqueue_function(k_tr, rm_h, hb0, Int32(nout[j]), Int32(kin[j]), grid_dim=ceildiv(kin[j] * (nout[j] // 2), 256), block_dim=256)
+                ctx.enqueue_function(k_trs0, rm_sv, sb0, Int32(nout[j]), Int32(kin[j]), grid_dim=ceildiv(nout[j] * (kin[j] // 64), 256), block_dim=256)
+                ctx.synchronize()
+                _ = rm_s.unsafe_ptr()
+                _ = rm_h.unsafe_ptr()
+                hk_early.append(hb0^)
+                sk_early.append(sb0^)
+            else:
+                lq.append(load_glint(ctx,nm,nbytes,"U8",pin_h,pin_h2,pin_path,pin_path2))
             var rowmaj = load_glint_host(ctx,nm+".glint_plug",nbytes,"U8",pin_h,pin_h2,pin_path,pin_path2)
             var src_dev = ctx.enqueue_create_buffer[DType.uint8](nbytes)
             var dst_dev = ctx.enqueue_create_buffer[DType.uint8](nbytes)
@@ -447,7 +469,8 @@ def main() raises:
             ctx.enqueue_copy(dst_buf=pk, src_buf=dst_dev)
             ctx.synchronize()
             plugk_host.append(pk^)
-            ls.append(load_glint(ctx,nm+".absmax",nout[j]*kin[j]//64*4,"F32",pin_h,pin_h2,pin_path,pin_path2))
+            if not kgemv:
+                ls.append(load_glint(ctx,nm+".absmax",nout[j]*kin[j]//64*4,"F32",pin_h,pin_h2,pin_path,pin_path2))
     var table_ent=pin_h[0][find_entry(pin_h,"_glint_cells")].copy()
     if table_ent.dtype!="F32" or len(table_ent.shape)!=2 or table_ent.shape[0]!=16 or table_ent.shape[1]!=16:
         raise Error("invalid pin _glint_cells shape")
@@ -465,6 +488,8 @@ def main() raises:
         innorm_v.append(DeviceBuffer[DType.bfloat16](ctx, in_norm[l].unsafe_ptr().unsafe_bitcast[BFloat16](), H, owning=False))
         postnorm_v.append(DeviceBuffer[DType.bfloat16](ctx, post_norm[l].unsafe_ptr().unsafe_bitcast[BFloat16](), H, owning=False))
         for j in range(4):
+            if kgemv:
+                continue
             wq_v.append(DeviceBuffer[DType.uint8](ctx, lq[l * 4 + j].unsafe_ptr(), nout[j] * kin[j] // 2, owning=False))
             sw_v.append(DeviceBuffer[DType.float32](ctx, ls[l * 4 + j].unsafe_ptr().unsafe_bitcast[Float32](), nout[j] * kin[j] // 64, owning=False))
 
@@ -609,25 +634,28 @@ def main() raises:
     var ev_gat2 = ctx.create_event()
     # Optional K-major copies of the hole nibbles and block scales (extra VRAM ~ the size of the resident hole + scales) so the
     # selected-channel correction reads are coalesced across rows.
-    var hk_u8 = List[type_of(ctx.enqueue_create_buffer[DType.uint8](1))]()
-    var sk_f = List[type_of(ctx.enqueue_create_buffer[DType.float32](1))]()
+    var hk_u8 = hk_early^
+    var sk_f = sk_early^
     var hk_v = List[DeviceBuffer[DType.uint8]]()
     var sk_v = List[DeviceBuffer[DType.float32]]()
+    var hk32 = List[DeviceBuffer[DType.uint32]]()
     if kmaj:
         var k_trs = ctx.compile_function[transpose_scales[ImmUntrackedOrigin, MutUntrackedOrigin]]()
-        for i in range(LAYERS * 4):
-            var jj = i % 4
-            var hb = ctx.enqueue_create_buffer[DType.uint8](nout[jj] * kin[jj] // 2)
-            var sb = ctx.enqueue_create_buffer[DType.float32](nout[jj] * kin[jj] // 64)
-            ctx.enqueue_function(k_tr, wq_v[i], hb, Int32(nout[jj]), Int32(kin[jj]), grid_dim=ceildiv(kin[jj] * (nout[jj] // 2), 256), block_dim=256)
-            ctx.enqueue_function(k_trs, sw_v[i], sb, Int32(nout[jj]), Int32(kin[jj]), grid_dim=ceildiv(nout[jj] * (kin[jj] // 64), 256), block_dim=256)
-            hk_u8.append(hb^)
-            sk_f.append(sb^)
-        ctx.synchronize()
+        if not kgemv:
+            for i in range(LAYERS * 4):
+                var jj = i % 4
+                var hb = ctx.enqueue_create_buffer[DType.uint8](nout[jj] * kin[jj] // 2)
+                var sb = ctx.enqueue_create_buffer[DType.float32](nout[jj] * kin[jj] // 64)
+                ctx.enqueue_function(k_tr, wq_v[i], hb, Int32(nout[jj]), Int32(kin[jj]), grid_dim=ceildiv(kin[jj] * (nout[jj] // 2), 256), block_dim=256)
+                ctx.enqueue_function(k_trs, sw_v[i], sb, Int32(nout[jj]), Int32(kin[jj]), grid_dim=ceildiv(nout[jj] * (kin[jj] // 64), 256), block_dim=256)
+                hk_u8.append(hb^)
+                sk_f.append(sb^)
+            ctx.synchronize()
         for i in range(LAYERS * 4):
             var jj = i % 4
             hk_v.append(DeviceBuffer[DType.uint8](ctx, hk_u8[i].unsafe_ptr(), nout[jj] * kin[jj] // 2, owning=False))
             sk_v.append(DeviceBuffer[DType.float32](ctx, sk_f[i].unsafe_ptr(), nout[jj] * kin[jj] // 64, owning=False))
+            hk32.append(DeviceBuffer[DType.uint32](ctx, hk_u8[i].unsafe_ptr().unsafe_bitcast[UInt32](), nout[jj] * kin[jj] // 8, owning=False))
     var k_corrks = ctx.compile_function[apply_corr_ks[ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
     var k_comb = ctx.compile_function[combine_corr[ImmUntrackedOrigin, MutUntrackedOrigin]]()
     var part_buf = ctx.enqueue_create_buffer[DType.float32](KS * 16384)
@@ -786,10 +814,15 @@ def main() raises:
     var k_normf = ctx.compile_function[rms_norm_block[ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
     var k_lgf = ctx.compile_function[logits_warp[ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
     var k_cef = ctx.compile_function[ce_argmax_block[ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin]]()
+    var k_gkm = ctx.compile_function[glint_gemv_km[ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
+    var k_gkc = ctx.compile_function[gemv_km_combine[ImmUntrackedOrigin, MutUntrackedOrigin]]()
+    var part_g = ctx.enqueue_create_buffer[DType.float32](32 * 16384)
     var k_gemvf8 = ctx.compile_function[glint_gemv_fast[False, INTER, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
     var k_gemvf = ctx.compile_function[glint_gemv_fast[False, H, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
     var wq32 = List[DeviceBuffer[DType.uint32]]()
     for i in range(LAYERS * 4):
+        if kgemv:
+            break
         var jj = i % 4
         wq32.append(DeviceBuffer[DType.uint32](ctx, lq[i].unsafe_ptr().unsafe_bitcast[UInt32](), kin[jj] * nout[jj] // 8, owning=False))
     var nsel_h = (pct * H + 99) // 100
@@ -871,7 +904,11 @@ def main() raises:
                 ks.record_event(ev_in)
                 if fast:
                     if not skg:
-                        ks.enqueue_function(k_gemvf, wq32[l * 4 + 0], wq32[l * 4 + 0], sw_v[l * 4 + 0], t0b, hbf, qkv, Int32(QKV), Int32(H), grid_dim=ceildiv(QKV, 4), block_dim=128)
+                        if kgemv:
+                            ks.enqueue_function(k_gkm, hk32[l * 4 + 0], sk_v[l * 4 + 0], t0b, hbf, part_g, Int32(QKV), Int32(H), Int32(24), grid_dim=(ceildiv(QKV // 8, GTB), 24), block_dim=GTB)
+                            ks.enqueue_function(k_gkc, part_g, qkv, Int32(QKV), Int32(24), grid_dim=ceildiv(QKV, 128), block_dim=128)
+                        else:
+                            ks.enqueue_function(k_gemvf, wq32[l * 4 + 0], wq32[l * 4 + 0], sw_v[l * 4 + 0], t0b, hbf, qkv, Int32(QKV), Int32(H), grid_dim=ceildiv(QKV, 4), block_dim=128)
                 else:
                     ks.enqueue_function(k_gemv, wq_v[l * 4 + 0], wq_v[l * 4 + 0], sw_v[l * 4 + 0], t0b, hbf, qkv, Int32(QKV), Int32(H), grid_dim=ceildiv(QKV, 4), block_dim=128)
                 if stale and nh[l] > 0:
@@ -989,7 +1026,11 @@ def main() raises:
                 ks.record_event(ev_in)
                 if fast:
                     if not skg:
-                        ks.enqueue_function(k_gemvf, wq32[l * 4 + 1], wq32[l * 4 + 1], sw_v[l * 4 + 1], t0b, attnb, proj, Int32(H), Int32(H), grid_dim=ceildiv(H, 4), block_dim=128)
+                        if kgemv:
+                            ks.enqueue_function(k_gkm, hk32[l * 4 + 1], sk_v[l * 4 + 1], t0b, attnb, part_g, Int32(H), Int32(H), Int32(24), grid_dim=(ceildiv(H // 8, GTB), 24), block_dim=GTB)
+                            ks.enqueue_function(k_gkc, part_g, proj, Int32(H), Int32(24), grid_dim=ceildiv(H, 128), block_dim=128)
+                        else:
+                            ks.enqueue_function(k_gemvf, wq32[l * 4 + 1], wq32[l * 4 + 1], sw_v[l * 4 + 1], t0b, attnb, proj, Int32(H), Int32(H), grid_dim=ceildiv(H, 4), block_dim=128)
                 else:
                     ks.enqueue_function(k_gemv, wq_v[l * 4 + 1], wq_v[l * 4 + 1], sw_v[l * 4 + 1], t0b, attnb, proj, Int32(H), Int32(H), grid_dim=ceildiv(H, 4), block_dim=128)
                 if stale and nh[l] > 0:
@@ -1103,7 +1144,11 @@ def main() raises:
                 ks.record_event(ev_in)
                 if fast:
                     if not skg:
-                        ks.enqueue_function(k_gemvf, wq32[l * 4 + 2], wq32[l * 4 + 2], sw_v[l * 4 + 2], t0b, hbf, gu, Int32(2 * INTER), Int32(H), grid_dim=ceildiv(2 * INTER, 4), block_dim=128)
+                        if kgemv:
+                            ks.enqueue_function(k_gkm, hk32[l * 4 + 2], sk_v[l * 4 + 2], t0b, hbf, part_g, Int32(2 * INTER), Int32(H), Int32(24), grid_dim=(ceildiv(2 * INTER // 8, GTB), 24), block_dim=GTB)
+                            ks.enqueue_function(k_gkc, part_g, gu, Int32(2 * INTER), Int32(24), grid_dim=ceildiv(2 * INTER, 128), block_dim=128)
+                        else:
+                            ks.enqueue_function(k_gemvf, wq32[l * 4 + 2], wq32[l * 4 + 2], sw_v[l * 4 + 2], t0b, hbf, gu, Int32(2 * INTER), Int32(H), grid_dim=ceildiv(2 * INTER, 4), block_dim=128)
                 else:
                     ks.enqueue_function(k_gemv, wq_v[l * 4 + 2], wq_v[l * 4 + 2], sw_v[l * 4 + 2], t0b, hbf, gu, Int32(2 * INTER), Int32(H), grid_dim=ceildiv(2 * INTER, 4), block_dim=128)
                 if stale and nh[l] > 0:
@@ -1212,7 +1257,11 @@ def main() raises:
                 ks.record_event(ev_in)
                 if fast:
                     if not skg:
-                        ks.enqueue_function(k_gemvf8, wq32[l * 4 + 3], wq32[l * 4 + 3], sw_v[l * 4 + 3], t0b, actb, down, Int32(H), Int32(INTER), grid_dim=ceildiv(H, 4), block_dim=128)
+                        if kgemv:
+                            ks.enqueue_function(k_gkm, hk32[l * 4 + 3], sk_v[l * 4 + 3], t0b, actb, part_g, Int32(H), Int32(INTER), Int32(32), grid_dim=(ceildiv(H // 8, GTB), 32), block_dim=GTB)
+                            ks.enqueue_function(k_gkc, part_g, down, Int32(H), Int32(32), grid_dim=ceildiv(H, 128), block_dim=128)
+                        else:
+                            ks.enqueue_function(k_gemvf8, wq32[l * 4 + 3], wq32[l * 4 + 3], sw_v[l * 4 + 3], t0b, actb, down, Int32(H), Int32(INTER), grid_dim=ceildiv(H, 4), block_dim=128)
                 else:
                     ks.enqueue_function(k_gemv, wq_v[l * 4 + 3], wq_v[l * 4 + 3], sw_v[l * 4 + 3], t0b, actb, down, Int32(H), Int32(INTER), grid_dim=ceildiv(H, 4), block_dim=128)
                 if stale and ni[l] > 0:
@@ -1482,6 +1531,8 @@ def main() raises:
     _ = kvk.unsafe_ptr()
     _ = kvv.unsafe_ptr()
     _ = table_u8.unsafe_ptr()
+    _ = part_g.unsafe_ptr()
+    _ = len(hk32)
     _ = pool_all.unsafe_ptr()
     _ = so_all.unsafe_ptr()
     _ = sc_all.unsafe_ptr()

@@ -382,3 +382,30 @@ Replaces the full-plug channel-addressed staging buffer with a fixed pool of `ca
 | `pool+cap55` | 55% of rows | 886 MB | 283.4 | 9.0 | 73.34, 120/128: **invalid, overflow 1** (a miss had no free slot) |
 
 **Reading.** The pool is correct at 70% (bit-identical, no overflow) and invalid at 55%. It saves 0.48 GB and costs about 2 tok/s, because it adds about 768 tiny kernels per token (the single-block lookup and free-list scans are on the real pass's critical path). A whole-token skeleton needs the whole token's selected rows resident at once (35% of the plug is 0.56 GB, plus misses), so this design cannot go much below about 0.7 GB however it is tuned. The real staging saving needs the skeleton to run only a few layers ahead of the real pass, so staging is a few layers deep, not 32; that is the ephemeral rolling skeleton and is not built. The `pool` mode is kept for that later work and is not recommended as is.
+
+### One resident base layout: K-major GEMV (`kgemv`), 2026-11-14
+
+`mojo/p7_glint_gemv_km.mojo`: a parent-only GEMV that reads the K-major layout the correction already uses (one thread owns 8 rows of one 32-bit word, so a warp reads 128 contiguous bytes per channel; the channel range is split into 24 or 32 slices and a combine kernel adds the slices in order). With it the loader builds the K-major copy per tensor and frees the row-major hole and scales immediately, so only one base layout stays resident (about 1.8 GB less). The per-element expression is unchanged but the summation order is not, so outputs differ from the row-major kernel by the usual kernel-to-kernel noise.
+
+**Speed.** Same-run, interleaved, 35% fixup at 256 positions: row-major 88.4 and 96.9 ms per token, K-major 91.5 and 95.4 ms. Fold-only 19.8 ms against 23.8 ms. No speed cost.
+
+**VRAM, sampled over exactly the run (990 MiB desktop use at idle in both):**
+
+| arm (35% fixup, 128 positions) | peak MiB | ms/token |
+|---|---|---|
+| row-major + K-major (before) | 8073 | 88.1 |
+| `kgemv`, K-major only | **6246** | 91.6 |
+
+**Recorded gate, 2047 positions** (top-1 >= 95.0%, PPL within 2% of 5.486957), `kgemv`: 35%: 1988/2047 = 97.12%, PPL 5.4791 (-0.14%), 11.7 tok/s; 45%: 2004/2047 = 97.90%, PPL 5.4778 (-0.17%), 11.7 tok/s. Both pass.
+
+**Free-running rollout (Amendment 3, against the full-plug arm), `kgemv`, one run each (the summation-order change moves tracking):**
+
+| selection | prefix | agreement | tok/s | tracks |
+|---|---|---|---|---|
+| 35% | 23.83 | 82.0% | 12.76 | no (0.5 points under the bar; the row-major kernel scored 83.1%) |
+| 40% | 24.08 | 89.6% | 12.38 | yes |
+| 45% | 25.33 | 84.6% | 12.17 | yes (row-major: 92.4%) |
+
+**Reading.** With one resident base layout, the 40% and 45% arms still meet both written criteria and pass the gate, at 6246 MiB peak instead of 8073 MiB. The 35% arm's tracking flips with a change in summation order (83.1% to 82.0%), which confirms it is a noise-limited result sitting on the bar; 40% and 45% are the arms to quote. Rollouts here are one run each, not three.
+
+**Where the remaining VRAM is** (an estimate from the allocations, not a measured split): full-plug staging 1.6 GB, K-major hole and scales 1.8 GB, embedding and logits table 1.2 GB, KV cache 0.54 GB, plus the CUDA context. The 4.5 GiB target is not met: 6246 MiB measured, about 5.3 GiB above the desktop's idle use. Staging is the next large item and needs the layer-ahead skeleton (a few layers of staging instead of 32).
