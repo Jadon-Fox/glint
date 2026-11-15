@@ -152,6 +152,30 @@ Operator idea: the plug should be a piece that is simply added, with no decode. 
 
 Reading: a uniform 4-bit additive piece costs 1.8x to 2.5x the weight error of the child nibble, because the residual's range depends on which cell the hole chose and a uniform grid cannot use that. In weight error that is roughly what the 3-bit child plug gives. Not measured: what it does to model outputs, and how much time the decode costs today. The correction kernel (`apply_corr_ksc`) already uses a precomputed 16x16 delta table, so its "decode" is one table lookup plus reading the hole and the scale; the saving from an additive form would be memory streams read per element (three down to two), which has to be timed before it is worth a build.
 
+### H-G4 lead-time test, 2026-11-15: lead is NOT the bottleneck
+Skeleton lead over the real pass made adjustable (`GLINT_AHEAD_LAG`, 0..3 layers; ring of 4). Uniform 40%, 512 positions, three alternating repeats. `lakes/p7_glint/gfold_price_20261115/lag/`.
+
+| Lead (layers) | ms/token, 3 repeats |
+|---|---|
+| 0 | 101.04, 98.55, 98.63 |
+| 1 | 98.41, 98.41, 98.58 |
+| 2 | 98.60, 98.43, 98.54 |
+| 3 | 104.79, 98.48, 98.80 |
+
+Outputs identical at every lead (PPL 37.305394711155124, 485/512 in all 12 runs). Time per token does not depend on the lead (98.4-98.8 ms; two slower runs in the first round). So the real pass is not waiting for rows that arrive late: with one GPU the skeleton, the gathers and the real pass share the same device, and the token takes the sum of their work whatever the order. More lead does not buy speed here.
+
+### Where the time goes: cost per byte moved
+From the seven 2047-position runs above (one run each), time per token against bytes per token is a straight line:
+
+| Arms | Slope | Equivalent rate | Intercept (zero bytes) |
+|---|---|---|---|
+| relational / price (62.5 to 645.7 MB) | 0.110 ms per MB | 9.1 GB/s | about 31 ms |
+| uniform (162.7 to 646.2 MB) | 0.108 ms per MB | 9.3 GB/s | about 42 ms |
+
+The measured link ceiling is 11.2-11.6 GB/s (0.086-0.089 ms per MB). So about four fifths of the marginal cost of every extra byte is the link itself, and gather plus decode plus apply together add about one fifth on top. Decode is therefore not the main per-byte cost; removing it entirely would save at most about 20% of the byte-dependent time. The fixed part (two fold passes, attention, logits) is 31-42 ms.
+
+Consequence: at a given selection, speed is set by bytes that cross the link per token. The levers that remain are (a) not re-sending rows that are already on the device (the reuse probe says a 4-token window covers about 83% of bytes at 35% and 90% at 45%, as an upper bound), and (b) needing fewer rows for the same tracking. Selection stays the model's own choice; residency only avoids moving the same row twice.
+
 ## 7. What this does not claim
 
 No measurement. No statement that the tightness theorem holds across layers. No M6 acceptance. The free-running bars remain agent-written and unratified.

@@ -915,6 +915,13 @@ def main() raises:
                 key = 32767
             tk[i] = key
         print("MOJO_GLINT_PRICE price_e9", price_e9, "tkey_l0", tk[0], tk[1], tk[2], tk[3], "tkey_l31", tk[124], tk[125], tk[126], tk[127])
+    # Lead of the skeleton stream over the real pass, in layers (H-G4 lead-time test). Default AHEAD_LAG; 0..AHEAD_RING-1.
+    var alag = 0
+    for b in getenv("GLINT_AHEAD_LAG", "2").as_bytes():
+        alag = alag * 10 + Int(b) - 48
+    if alag > AHEAD_RING - 1:
+        raise Error("GLINT_AHEAD_LAG must be 0..AHEAD_RING-1")
+    print("MOJO_GLINT_AHEAD lag", alag, "ring", AHEAD_RING)
     # Relational price (H-G2r): GLINT_TAU_Q10 = tau * 1024; every linear's threshold is tau * mean|x| of its own input, per token.
     var tau_q10 = 0
     for b in getenv("GLINT_TAU_Q10", "0").as_bytes():
@@ -958,7 +965,7 @@ def main() raises:
             ctx.stream().record_event(emb_done)
             ks.enqueue_wait_for(emb_done)
             ss.enqueue_wait_for(emb_done)
-            for step in range(LAYERS + AHEAD_LAG):
+            for step in range(LAYERS + alag):
                 if step < LAYERS:
                     var l = step
                     if l >= AHEAD_RING:
@@ -1001,8 +1008,8 @@ def main() raises:
                         gs.enqueue_function(k_gatx, plugk_w[l * 4 + 3], sidx[par * 128 + l * 4 + 3], scnt[par * 128 + l * 4 + 3], stg32[(l % AHEAD_RING) * 4 + 3], ovl_flags, Int32(nout[3] // 8), Int32(((l % AHEAD_RING) * 4 + 3) * INTER), Int32(pos * LAYERS + l + 1000), grid_dim=GB, block_dim=128)
                     ss.enqueue_function(k_res, down_s, xs, grid_dim=ceildiv(H, 256), block_dim=256)
                     gs.record_event(ev_pref[l])
-                if step >= AHEAD_LAG:
-                    var lr = step - AHEAD_LAG
+                if step >= alag:
+                    var lr = step - alag
                     ks.enqueue_wait_for(ev_pref[lr])
                     ks.enqueue_function(k_normf, x, innorm_v[lr], hbf, grid_dim=1, block_dim=256)
                     ks.enqueue_function(k_gkm, hk32[lr * 4 + 0], sk_v[lr * 4 + 0], t0b, hbf, part_g, Int32(QKV), Int32(H), Int32(24), grid_dim=(ceildiv(QKV // 8, GTB), 24), block_dim=GTB)

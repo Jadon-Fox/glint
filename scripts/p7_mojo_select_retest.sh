@@ -31,7 +31,7 @@ lxc exec 40-Runtime-Deps -- bash -c "export MODULAR_HOME=/root/.pixi/envs/modula
 for c in $CFGS; do
   IFS=: read -r pct fx mode ends endpct pct2 <<< "$c"; fx="${fx:-0}"; mode="${mode:-ref}"; ends="${ends:-0}"; endpct="${endpct:-0}"; pct2="${pct2:-0}"
   tag="p${pct}_n${fx}_${mode}_e${ends}x${endpct}_t${pct2}_s${STEPS}"; [ "${GLINT_PRICE_E9:-0}" != 0 ] && tag="${tag}_price${GLINT_PRICE_E9}"
-  bash "$FL" -- lxc exec 40-Runtime-Deps -- env MODULAR_HOME=/root/.pixi/envs/modular/share/max GLINT_PRICE_E9="${GLINT_PRICE_E9:-0}" GLINT_PRICE_TABLE="${GLINT_PRICE_TABLE:-}" GLINT_TAU_Q10="${GLINT_TAU_Q10:-0}" /tmp/p7_select_retest "$PIN" "$M" "$A" "$STEPS" "$pct" "$fx" "$mode" "$ends" "$endpct" "$pct2" > "$OUT/$tag.log" 2>&1
+  bash "$FL" -- lxc exec 40-Runtime-Deps -- env MODULAR_HOME=/root/.pixi/envs/modular/share/max GLINT_PRICE_E9="${GLINT_PRICE_E9:-0}" GLINT_PRICE_TABLE="${GLINT_PRICE_TABLE:-}" GLINT_TAU_Q10="${GLINT_TAU_Q10:-0}" GLINT_AHEAD_LAG="${GLINT_AHEAD_LAG:-2}" /tmp/p7_select_retest "$PIN" "$M" "$A" "$STEPS" "$pct" "$fx" "$mode" "$ends" "$endpct" "$pct2" > "$OUT/$tag.log" 2>&1
   echo "== $tag exit $?" >> "$OUT/summary.txt"
   grep -E "^MOJO_GLINT_(PRICE|SELECT_(CONFIG|DECODE steps|DECODE ppl|STATS))" "$OUT/$tag.log" | cut -c1-230 >> "$OUT/summary.txt"
 done
