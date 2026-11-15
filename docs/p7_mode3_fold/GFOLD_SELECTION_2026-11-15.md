@@ -140,6 +140,18 @@ Not pre-registered, so only an observation: the relational arms ran 9-16% faster
 
 Conclusion for selection: on the teacher-forced gate, three rules (rank per linear, absolute price, relational price) land within about one point of each other at equal bytes. The choice of rule among these is not where the remaining gain is. Free-running tracking was not tested for the price rules.
 
+### Additive plug, offline weight-space check, 2026-11-15 (CPU, all 128 linears, against the BF16 source)
+Operator idea: the plug should be a piece that is simply added, with no decode. Script `scripts/glint_additive_plug_offline.py`; output `lakes/p7_glint/gfold_price_20261115/additive_plug_offline.tsv`.
+
+| Form (4 bits per weight each) | Apply needs | Mean RMS error vs BF16 | vs child nibble |
+|---|---|---|---|
+| fold only | - | 3.002e-3 | 14.2x |
+| child nibble (the pin today) | hole + 16x16 delta table + absmax | 2.118e-4 | 1.00x |
+| additive, scale per 64-block | plug + block scale (no hole, no table) | 3.766e-4 | 1.78x (1.61-1.79 over linears) |
+| additive, scaled by absmax only | plug + absmax (no hole, no table, no extra bytes) | 5.367e-4 | 2.53x (2.50-2.79) |
+
+Reading: a uniform 4-bit additive piece costs 1.8x to 2.5x the weight error of the child nibble, because the residual's range depends on which cell the hole chose and a uniform grid cannot use that. In weight error that is roughly what the 3-bit child plug gives. Not measured: what it does to model outputs, and how much time the decode costs today. The correction kernel (`apply_corr_ksc`) already uses a precomputed 16x16 delta table, so its "decode" is one table lookup plus reading the hole and the scale; the saving from an additive form would be memory streams read per element (three down to two), which has to be timed before it is worth a build.
+
 ## 7. What this does not claim
 
 No measurement. No statement that the tightness theorem holds across layers. No M6 acceptance. The free-running bars remain agent-written and unratified.
