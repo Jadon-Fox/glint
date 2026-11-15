@@ -915,6 +915,14 @@ def main() raises:
                 key = 32767
             tk[i] = key
         print("MOJO_GLINT_PRICE price_e9", price_e9, "tkey_l0", tk[0], tk[1], tk[2], tk[3], "tkey_l31", tk[124], tk[125], tk[126], tk[127])
+    # Relational price (H-G2r): GLINT_TAU_Q10 = tau * 1024; every linear's threshold is tau * mean|x| of its own input, per token.
+    var tau_q10 = 0
+    for b in getenv("GLINT_TAU_Q10", "0").as_bytes():
+        tau_q10 = tau_q10 * 10 + Int(b) - 48
+    if tau_q10 > 0:
+        for i in range(LAYERS * 4):
+            tk[i] = -tau_q10
+        print("MOJO_GLINT_PRICE tau_q10", tau_q10)
     var bytes_total = 0
     var frac_sum = Float64(0)
     print("MOJO_GLINT_SELECT_CONFIG fast", fast, "attn_split", attn_split, "dsel", dsel, "kmaj", kmaj, "vgat", vgat, "roll", roll, "stale", stale, "tier", tier, "pct2", pct2, "ksplit", ksplit, "abl", abl, "ends", ends, "endpct", endpct, "percent", pct, "fixed_n", fixed_n, "nsel_hidden", nsel_h, "nsel_inter", nsel_i)

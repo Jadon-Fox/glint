@@ -122,6 +122,24 @@ Relational price: fetch channel c of linear j iff |x_jc| >= tau * mean_c|x_j| fo
 - Test: 2047 positions, tau chosen to match 163, 404 and 646 MB per token, against the uniform arms above.
 - falsifyIf: top-1 is not higher than the uniform arm at two of the three budgets (one run each; a difference under 5 positions of 2047 counts as no difference).
 
+### H-G2r result: NULL by its own rule, 2026-11-15
+Same mode and positions, one run each, cap 60%. Unchanged-behaviour check repeated after the kernel change (identical). `lakes/p7_glint/gfold_price_20261115/gate2047_tau/`.
+
+| Arm | MB/token | top-1 | PPL | tok/s |
+|---|---|---|---|---|
+| uniform 10% | 162.7 | 1957 (95.60%) | 5.5132 | 16.74 |
+| relational tau 2.10 | 165.2 | 1956 (95.55%) | 5.5012 | 19.44 |
+| uniform 25% | 404.5 | 1979 (96.68%) | 5.4764 | 11.07 |
+| relational tau 1.40 | 395.0 | 1969 (96.19%) | 5.4806 | 13.05 |
+| uniform 40% | 646.2 | 1999 (97.66%) | 5.4761 | 8.93 |
+| relational tau 0.96 | 645.7 | 1998 (97.61%) | 5.4698 | 9.75 |
+
+Top-1 is a tie at two budgets (1 position each, inside the 5-position band) and lower at the middle one (10 positions, at 2.3% fewer bytes). Not higher at two of three, so H-G2r is falsified as written. The relational rule recovers what the absolute price lost (95.21 -> 95.55, 95.65 -> 96.19, 97.02 -> 97.61), which supports the reading that relative, not absolute, error is what matters, but it does not beat ranking inside each linear.
+
+Not pre-registered, so only an observation: the relational arms ran 9-16% faster at equal bytes. The uniform arms ran first in the batch and ambient load was not controlled, so this needs alternating repeats before it means anything.
+
+Conclusion for selection: on the teacher-forced gate, three rules (rank per linear, absolute price, relational price) land within about one point of each other at equal bytes. The choice of rule among these is not where the remaining gain is. Free-running tracking was not tested for the price rules.
+
 ## 7. What this does not claim
 
 No measurement. No statement that the tightness theorem holds across layers. No M6 acceptance. The free-running bars remain agent-written and unratified.

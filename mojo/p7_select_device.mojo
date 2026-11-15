@@ -51,6 +51,52 @@ def select_topk[
     # acts only as the cap that bounds the staging buffers: the kept set is every channel with key >= max(rank threshold, tkey).
     if Int(tkey) > thr:
         thr = Int(tkey)
+    # Relational price (H-G2r): tkey < 0 means tau = -tkey / 1024, and the threshold is tau * mean|x| of THIS input vector.
+    if Int(tkey) < 0:
+        var redf = stack_allocation[SB, Float32, address_space=AddressSpace.SHARED]()
+        var acc = Float32(0)
+        for i in range(lo_i, hi_i):
+            var k = Int(x[unsafe_offset=i]) & 32767
+            var ex = k >> 7
+            if ex > 0:
+                var f = Float32(128 + (k & 127))
+                var n = ex - 134
+                if n > 40:
+                    n = 40
+                if n < -60:
+                    n = -60
+                while n > 0:
+                    f = f * 2.0
+                    n -= 1
+                while n < 0:
+                    f = f * 0.5
+                    n += 1
+                acc += f
+        redf[unsafe_offset=tid] = acc
+        barrier()
+        comptime for step in range(10):
+            comptime off = 512 >> step
+            if tid < off:
+                redf[unsafe_offset=tid] = redf[unsafe_offset=tid] + redf[unsafe_offset=tid + off]
+            barrier()
+        var t = redf[unsafe_offset=0] / Float32(kk) * Float32(-Int(tkey)) / 1024.0
+        barrier()
+        var rk = 1
+        if t > 0.0:
+            var e2 = 0
+            while t >= 2.0 and e2 < 100:
+                t = t * 0.5
+                e2 += 1
+            while t < 1.0 and e2 > -120:
+                t = t * 2.0
+                e2 -= 1
+            rk = ((e2 + 127) << 7) | Int((t - 1.0) * 128.0)
+            if rk < 1:
+                rk = 1
+            if rk > 32767:
+                rk = 32767
+        if rk > thr:
+            thr = rk
     var mine = 0
     for i in range(lo_i, hi_i):
         if (Int(x[unsafe_offset=i]) & 32767) >= thr:
