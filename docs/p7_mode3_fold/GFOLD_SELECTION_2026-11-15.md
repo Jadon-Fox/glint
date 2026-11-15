@@ -169,10 +169,10 @@ From the seven 2047-position runs above (one run each), time per token against b
 
 | Arms | Slope | Equivalent rate | Intercept (zero bytes) |
 |---|---|---|---|
-| relational / price (62.5 to 645.7 MB) | 0.110 ms per MB | 9.1 GB/s | about 31 ms |
-| uniform (162.7 to 646.2 MB) | 0.108 ms per MB | 9.3 GB/s | about 42 ms |
+| relational / price (62.5 to 645.7 MB) | 0.110 ms per MB | 9.1 GB/s | 32.5 ms |
+| uniform (162.7 to 646.2 MB) | 0.108 ms per MB | 9.3 GB/s | 43.6 ms |
 
-The measured link ceiling is 11.2-11.6 GB/s (0.086-0.089 ms per MB). So about four fifths of the marginal cost of every extra byte is the link itself, and gather plus decode plus apply together add about one fifth on top. Decode is therefore not the main per-byte cost; removing it entirely would save at most about 20% of the byte-dependent time. The fixed part (two fold passes, attention, logits) is 31-42 ms.
+The measured link ceiling is 11.2-11.6 GB/s (0.086-0.089 ms per MB). So about four fifths of the marginal cost of every extra byte is the link itself, and gather plus decode plus apply together add about one fifth on top. Decode is therefore not the main per-byte cost; removing it entirely would save at most about 20% of the byte-dependent time. The fixed part (two fold passes, attention, logits) is 32.5-43.6 ms.
 
 Consequence: at a given selection, speed is set by bytes that cross the link per token. The levers that remain are (a) not re-sending rows that are already on the device (the reuse probe says a 4-token window covers about 83% of bytes at 35% and 90% at 45%, as an upper bound), and (b) needing fewer rows for the same tracking. Selection stays the model's own choice; residency only avoids moving the same row twice.
 
