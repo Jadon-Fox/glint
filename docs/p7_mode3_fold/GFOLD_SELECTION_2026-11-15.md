@@ -336,3 +336,23 @@ exact bf16 ties (0) that the argmax breaks by lowest token index. 9.8% of refere
 Consequence (agent reading, not a ruling): the free-running rule as written scores the outcome of reference ties. A measure
 of stumbles needs the reference's logit for the token the arm chose at the divergence (not yet recorded: this run shows
 the reference was tied between its top two, not that the arm chose one of those two).
+
+### Reference score of the token each arm chose at its first divergence (2026-11-16)
+
+Data: `/home/workspace/lakes/p7_glint/gfold_price_20261115/margin/alt/`. New switch `GLINT_ALT_FILE` (triplets prompt, step,
+token): the run prints its own bf16 logit gap between its choice and the listed token. Both full-plug references were
+re-run with the 25 distinct (prompt, step, token) first divergences of the four arms (35%, 40%, 35% + re-run 100%,
+35% + re-run 60%); their generated tokens are identical to the earlier reference runs.
+
+| reference gap to the arm's token | count of 25 |
+|---|---|
+| 0 (exact bf16 tie, argmax broke it by token index) | 12 |
+| 0.12 | 1 |
+| 0.25 | 10 |
+| 0.50 | 2 |
+| above 0.50 | 0 |
+
+Every token on which an arm first left the reference is one the reference itself scored within 0.50 logits of its own
+choice (probability ratio at most e^0.5 = 1.65), and 12 of 25 were exact ties. No arm, including plain 35% at 97.2
+ms/token, chose a token the reference scored clearly below its choice. Limits: only the first divergence per prompt can
+be scored this way (afterwards the contexts differ); 24 prompts; one model.

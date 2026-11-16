@@ -1002,6 +1002,25 @@ def main() raises:
     var esc_count = 0
     var redo = False
     var itn = 0
+    # GLINT_ALT_FILE: integer triplets (prompt, generated step, token). At that step the run prints its own bf16 logit gap
+    # between its chosen token and the listed token (how far below its choice this run scores another run's choice).
+    var alt = List[Int]()
+    var altp = getenv("GLINT_ALT_FILE", "")
+    if altp != "":
+        var cur2 = 0
+        var have2 = False
+        for b in open(altp, "r").read().as_bytes():
+            if b >= 48 and b <= 57:
+                cur2 = cur2 * 10 + Int(b) - 48
+                have2 = True
+            elif have2:
+                alt.append(cur2)
+                cur2 = 0
+                have2 = False
+        if have2:
+            alt.append(cur2)
+    var a1h = ctx.enqueue_create_host_buffer[DType.float32](1)
+    var a2h = ctx.enqueue_create_host_buffer[DType.float32](1)
     print("MOJO_GLINT_ESC margin_on", mrg_on, "m100", esc_m100, "pct", esc_pct)
     # Relational price (H-G2r): GLINT_TAU_Q10 = tau * 1024; every linear's threshold is tau * mean|x| of its own input, per token.
     var tau_q10 = 0
@@ -1727,6 +1746,14 @@ def main() raises:
             ctx.enqueue_copy(dst_buf=t1h, src_buf=t1v)
             ctx.synchronize()
             gen[pi * 32 + q - 63] = Int(t1h[0])
+            for ai in range(len(alt) // 3):
+                if alt[ai * 3] == pi and alt[ai * 3 + 1] == q - 63:
+                    var av = DeviceBuffer[DType.float32](ctx, lg.unsafe_ptr().unsafe_offset(alt[ai * 3 + 2]), 1, owning=False)
+                    var cv = DeviceBuffer[DType.float32](ctx, lg.unsafe_ptr().unsafe_offset(Int(t1h[0])), 1, owning=False)
+                    ctx.enqueue_copy(dst_buf=a1h, src_buf=av)
+                    ctx.enqueue_copy(dst_buf=a2h, src_buf=cv)
+                    ctx.synchronize()
+                    print("MOJO_ALT prompt", pi, "step", q - 63, "token", alt[ai * 3 + 2], "chosen", Int(t1h[0]), "gap_x100", Int((bf16r(a2h[0]) - bf16r(a1h[0])) * 100.0))
         if (pos + 1) % 64 == 0:
             print("decode positions", pos + 1, "/", steps)
     var elapsed = Float64(perf_counter_ns() - t0) / 1e9
