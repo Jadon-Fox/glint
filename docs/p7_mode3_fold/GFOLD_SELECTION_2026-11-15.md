@@ -202,6 +202,25 @@ Peak card memory (nvidia-smi, 1 s samples, idle 586 MiB before both): staged 452
 
 Reading: the ephemeral plug is exact (same outputs as true same-token selection), needs one fold pass instead of two, has no skeleton, no misses and no plug bytes stored on the device, and is 9% slower than the staged path at 40%. The byte-read shape was most of the first gap (241 -> 127 ms); overlap with the fold GEMV added 5.5 ms. Skeleton scratch buffers are still allocated in this build, so 190 MiB is a lower bound on the saving. The machine carried more background load today (staged 98.5 ms on 2026-11-15 early morning, about 111 ms now); only same-batch comparisons are used.
 
+### Free-running results, 2026-11-15 (12 prompts x 32 greedy tokens, reference = Mojo full-plug arm; bars agent-written: prefix >= 20.0, agreement >= 82.5%)
+`lakes/p7_glint/gfold_price_20261115/eph_roll/`. Machine under more background load than on 2026-11-14 (staged 40% was 10.65 tok/s then, 8.98 now); compare within this batch only.
+
+| Arm | MB/token | prefix | agreement | tok/s | tracks |
+|---|---|---|---|---|---|
+| staged + skeleton, uniform 40% | 646 | 24.08 | 89.6% | 8.98 | yes |
+| ephemeral, uniform 35% (2 runs) | 566 | 23.83 | 82.0% | 9.22, 9.19 | no (0.5 point short) |
+| ephemeral, uniform 40% (2 runs) | 646 | 24.08 | 89.6% | 8.25, 8.26 | yes |
+| ephemeral, uniform 45% (2 runs) | 727 | 25.33 | 84.6% | 7.47, 7.49 | yes |
+| staged, relational tau 0.96 | 642 | 15.67 | 57.3% | 8.65 | **no** |
+| ephemeral, relational tau 0.96 | 642 | 15.67 | 57.3% | 8.20 | **no** |
+
+Ephemeral gate, uniform 40%, 2047 positions: PPL 5.476149214861787, top-1 1999/2047 (97.66%), 8.19 tok/s: the same top-1 and PPL as the staged uniform 40% run.
+
+Findings:
+1. The ephemeral plug generates exactly what the staged path generates at every fraction (same prefix and agreement to the digit, same gate result). It is the same model output with no skeleton, no staging and one fold pass, at 8% lower speed.
+2. The relational price rule FAILS free-running: 57.3% agreement against 89.6% for the uniform fraction at the same bytes, although the two were within one position of 2047 on the teacher-forced gate. So H-G3 is falsified for the relational rule, and the teacher-forced gate did not predict tracking here. What the uniform rule guarantees and the threshold rule does not is a fixed share of every linear at every token; that is the candidate explanation and it is not tested.
+3. No arm in this batch reaches 10 tok/s on today's machine state.
+
 ## 7. What this does not claim
 
 No measurement. No statement that the tightness theorem holds across layers. No M6 acceptance. The free-running bars remain agent-written and unratified.
