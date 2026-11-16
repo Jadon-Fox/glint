@@ -361,9 +361,9 @@ be scored this way (afterwards the contexts differ); 24 prompts; one model.
 
 2047 positions, gate top-1 >= 95.0% and PPL within 2% of 5.486957. Data: `margin/gate_tr_p35.log`, `margin/gate_tr_p30.log`.
 
-| share | top-1 | PPL | gate |
-|---|---|---|---|
-| 40% (roll2) | 1999/2047 = 97.66% | 5.476149 | pass |
+| share | top-1 | PPL | gate | speed |
+|---|---|---|---|---|
+| 40% (roll2) | 1999/2047 = 97.66% | 5.476149 | pass | 109.0 ms/token, 9.17 tok/s |
 | 35% | 1988/2047 = 97.12% | 5.479107 | pass | 98.4 ms/token, 10.17 tok/s |
 | 30% | 1981/2047 = 96.78% | 5.483165 | pass | 87.1 ms/token, 11.48 tok/s |
 
