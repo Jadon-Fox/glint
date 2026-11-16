@@ -375,11 +375,11 @@ Data: `margin/{A,B}_m30.log`, `{A,B}_m25.log`, `{A,B}_ref100alt2.log`, `gate_tr_
 
 | share | set A prefix / agree | set B prefix / agree | first divergences (24 prompts) | reference gap to the arm's token | ms/token free-running |
 |---|---|---|---|---|---|
-| 30% | 20.58 / 66.1% no | 17.42 / 56.2% no | 15 | 0 (7), 0.25 (5), 0.37 (1), 0.50 (1), plus 1 of 0.25 at prompt A1 | 86.3 / 86.5 |
-| 25% | 15.08 / 50.3% no | 19.42 / 61.7% no | 16 | all <= 0.50 (largest 0.50, prompt A4 step 1) | 75.7 / 75.4 |
+| 30% | 20.58 / 66.1% no | 17.42 / 56.2% no | 15 | 0 (8), 0.25 (5), 0.37 (1), 0.50 (1) | 86.3 / 86.5 |
+| 25% | 15.08 / 50.3% no | 19.42 / 61.7% no | 16 | 0 (6), 0.12 (1), 0.25 (7), 0.37 (1), 0.50 (1) | 75.7 / 75.4 |
 
 The 20 distinct (prompt, step, token) first divergences of the 30% and 25% arms were all scored by the reference within
-0.50 logits of its own choice; 7 are exact ties. So down to 25% no arm has first left the reference on a token the
+0.50 logits of its own choice; 8 are exact ties. So down to 25% no arm has first left the reference on a token the
 reference clearly rejected, while the agreement number falls to 50 to 66%. The 25% arm has not been run on the 2047 gate.
 
 Speed repeats, 2047-position gate, transient ephemeral: 35% = 98.37, 97.98, 98.27 ms/token (10.17, 10.21, 10.18 tok/s),
