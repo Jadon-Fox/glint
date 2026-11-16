@@ -356,3 +356,15 @@ Every token on which an arm first left the reference is one the reference itself
 choice (probability ratio at most e^0.5 = 1.65), and 12 of 25 were exact ties. No arm, including plain 35% at 97.2
 ms/token, chose a token the reference scored clearly below its choice. Limits: only the first divergence per prompt can
 be scored this way (afterwards the contexts differ); 24 prompts; one model.
+
+### Teacher-forced gate at lower shares, transient ephemeral path (2026-11-16)
+
+2047 positions, gate top-1 >= 95.0% and PPL within 2% of 5.486957. Data: `margin/gate_tr_p35.log`, `margin/gate_tr_p30.log`.
+
+| share | top-1 | PPL | gate |
+|---|---|---|---|
+| 40% (roll2) | 1999/2047 = 97.66% | 5.476149 | pass |
+| 35% | 1981/2047 = 96.78% | 5.483165 | pass |
+| 30% | 1988/2047 = 97.12% | 5.479107 | pass |
+
+Top-1 is not monotone in the share (30% above 35%), a spread of 7 positions in 2047. 30% has not been run free-running.
