@@ -238,3 +238,42 @@ Reading: on one GPU the skeleton is not needed. True selection with one fold pas
 ## 7. What this does not claim
 
 No measurement. No statement that the tightness theorem holds across layers. No M6 acceptance. The free-running bars remain agent-written and unratified.
+
+## Second prompt set, floor share, transient gate (2026-11-16)
+
+Data: `/home/workspace/lakes/p7_glint/gfold_price_20261115/roll2/`. One batch, one build (identity check passed: 35%, 128
+positions, PPL 74.34960059115652). New switches, default off: `GLINT_FLOOR_PCT` (guaranteed share of each linear's largest
+channels; the relational threshold decides only what goes above it, under the cap) and `GLINT_ROLL_OFFSET` (shifts the 12
+rollout prompts inside the evaluation text; 64 gives 12 prompts that do not overlap the first 12). Set B is scored against
+its own full-plug run (`B_ref100`). The re-run full-plug reference for set A reproduces the 2026-11-09 tokens exactly.
+
+Transient ephemeral plug (`GLINT_EPHEMERAL=2`), free-running, rule prefix >= 20.0 and agreement >= 82.5% (agent-written):
+
+| plug share | set A prefix / agree | set B prefix / agree | pooled 24 prompts | ms/token |
+|---|---|---|---|---|
+| 35% | 23.83 / 82.0% no | 17.00 / 61.7% no | 20.42 / 71.9% no | 97.2 |
+| 40% | 24.08 / 89.6% yes | 18.42 / 63.0% no | 21.25 / 76.3% no | 107.7 |
+| 45% | 25.33 / 84.6% yes | 23.58 / 74.7% no | 24.46 / 79.7% no | 118.9 |
+
+- Set A results equal the staged path token for token (same numbers as `eph_roll`). The transient path on the 2047 gate
+  gives 1999/2047, PPL 5.476149214861787, the same as staged.
+- **The tracking result does not generalise.** No share from 35 to 45% passes on set B, and none passes pooled. Every earlier
+  "tracks at 40%" statement rests on set A alone and is withdrawn as a general claim.
+- Per-prompt matched prefixes are two-valued: a prompt either matches all 32 tokens or diverges early and stays diverged
+  (set A at 40%: 32 8 32 32 32 7 32 19 26 32 5 32; set B at 40%: 5 10 29 32 4 9 32 32 32 4 0 32). They are not monotone in
+  the share (set A prompt 0: 1, 32, 1 at 35/40/45%). One changed token decides a prompt, so a 12-prompt mean moves by
+  several points on one flip, and agreement after the first divergence compares different contexts.
+
+Floor share with the relational threshold (set A only, cap 60%, floor 25%; byte counter does not count the ephemeral path,
+so time per token stands in for bytes):
+
+| arm | prefix / agree | ms/token | nearest uniform arm by time |
+|---|---|---|---|
+| floor 25% + tau 1.10 | 26.50 / 82.8% yes | 102.8 | between 35% (97.2) and 40% (107.7) |
+| floor 25% + tau 1.30 | 19.42 / 63.0% no | 88.7 | below 35% |
+| pure threshold, 40% bytes (earlier) | - / 57.3% no | - | 40% |
+
+The floor moves the threshold rule from 57.3% to 82.8% on set A at fewer bytes than uniform 40%, with the longest mean
+prefix measured. Given the set B result this is one sample of 12 prompts and is not a ranking.
+
+Open: the byte counter in ephemeral mode; whether first divergences sit at near-tie positions (next section).

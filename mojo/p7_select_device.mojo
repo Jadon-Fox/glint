@@ -19,7 +19,7 @@ def select_topk[
     idx: MutPointer[Int32, io],
     cnt: MutPointer[Int32, co],
     cnt_log: MutPointer[Int32, lo],
-    slot: Int32, kdim: Int32, nsel: Int32, tkey: Int32,
+    slot: Int32, kdim: Int32, nsel: Int32, tkey: Int32, nfloor: Int32,
 ):
     var tid = Int(thread_idx.x)
     var kk = Int(kdim)
@@ -49,6 +49,7 @@ def select_topk[
             thr = cand
     # Price mode (G-fold selection, GFOLD_SELECTION_2026-11-15.md): tkey > 0 is a fixed |x| key threshold for this linear. nsel then
     # acts only as the cap that bounds the staging buffers: the kept set is every channel with key >= max(rank threshold, tkey).
+    var thr_cap = thr
     if Int(tkey) > thr:
         thr = Int(tkey)
     # Relational price (H-G2r): tkey < 0 means tau = -tkey / 1024, and the threshold is tau * mean|x| of THIS input vector.
@@ -97,6 +98,31 @@ def select_topk[
                 rk = 32767
         if rk > thr:
             thr = rk
+    # Floor (2026-11-16): with a price threshold active, every linear still keeps at least its nfloor largest channels, i.e. the
+    # kept set is {key >= max(cap threshold, min(price threshold, floor-rank threshold))}.
+    if Int(nfloor) > 0 and Int(tkey) != 0:
+        var thf = 0
+        for bi in range(15):
+            var cand = thf | (1 << (14 - bi))
+            var c = 0
+            for i in range(lo_i, hi_i):
+                if (Int(x[unsafe_offset=i]) & 32767) >= cand:
+                    c += 1
+            red[unsafe_offset=tid] = Int32(c)
+            barrier()
+            comptime for step in range(10):
+                comptime off = 512 >> step
+                if tid < off:
+                    red[unsafe_offset=tid] = red[unsafe_offset=tid] + red[unsafe_offset=tid + off]
+                barrier()
+            var total = Int(red[unsafe_offset=0])
+            barrier()
+            if total >= Int(nfloor):
+                thf = cand
+        if thf < thr:
+            thr = thf
+        if thr < thr_cap:
+            thr = thr_cap
     var mine = 0
     for i in range(lo_i, hi_i):
         if (Int(x[unsafe_offset=i]) & 32767) >= thr:
