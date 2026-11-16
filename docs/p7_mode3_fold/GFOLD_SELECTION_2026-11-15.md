@@ -385,3 +385,22 @@ reference clearly rejected, while the agreement number falls to 50 to 66%. The 2
 Speed repeats, 2047-position gate, transient ephemeral: 35% = 98.37, 97.98, 98.27 ms/token (10.17, 10.21, 10.18 tok/s),
 identical outputs each time (1988/2047, PPL 5.47910741239947); 30% = 87.09, 87.32 ms/token (11.48, 11.45 tok/s), identical
 outputs (1981/2047, PPL 5.4831653173713635).
+
+### Where decided tokens start to change: 25%, 20%, 15% (2026-11-16)
+
+Data: `margin/{A,B}_m20.log`, `{A,B}_m15.log`, `{A,B}_ref100alt3.log`, `gate_tr_p25/p20/p15.log`. Transient ephemeral, same build.
+
+| share | gate top-1 | gate PPL | gate | ms/token (gate) | first divergences (24 prompts) | reference gap to the arm's token | above 0.50 |
+|---|---|---|---|---|---|---|---|
+| 40% | 1999/2047 = 97.66% | 5.476149 | pass | 109.0 | 12 | all <= 0.25 | 0 |
+| 35% | 1988/2047 = 97.12% | 5.479107 | pass | 98.2 | 13 | all <= 0.50 | 0 |
+| 30% | 1981/2047 = 96.78% | 5.483165 | pass | 87.2 | 15 | all <= 0.50 | 0 |
+| 25% | 1979/2047 = 96.68% | 5.476430 | pass | 76.3 | 16 | all <= 0.50 | 0 |
+| 20% | 1970/2047 = 96.24% | 5.494052 | pass | 65.2 | 15 | 0 (6), 0.25 (6), 0.37 (1), 0.50 (1), 1.00 (1) | 1 |
+| 15% | 1962/2047 = 95.85% | 5.490655 | pass | 54.1 | 17 | 0 (5), 0.25 (5), 0.37 (1), 0.50 (2), 1.00 (4) | 4 |
+
+- The first departure onto a token the reference scores more than 0.50 below its choice appears at 20% (1 of 24 prompts)
+  and grows at 15% (4 of 24). From 25% up there is none in this sample.
+- The teacher-forced gate passes at every share down to 15%, so the gate does not see this edge; the reference-gap
+  measure does. The old agreement number (50 to 90%) does not see it either: it moves with tie-breaks at every share.
+- 25% is the smallest share with no such departure: 76.3 ms/token (13.1 tok/s) on the gate, 75.4 to 75.7 free-running.
