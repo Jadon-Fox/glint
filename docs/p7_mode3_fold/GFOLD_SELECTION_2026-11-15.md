@@ -364,7 +364,7 @@ be scored this way (afterwards the contexts differ); 24 prompts; one model.
 | share | top-1 | PPL | gate |
 |---|---|---|---|
 | 40% (roll2) | 1999/2047 = 97.66% | 5.476149 | pass |
-| 35% | 1981/2047 = 96.78% | 5.483165 | pass |
-| 30% | 1988/2047 = 97.12% | 5.479107 | pass |
+| 35% | 1988/2047 = 97.12% | 5.479107 | pass | 98.4 ms/token, 10.17 tok/s |
+| 30% | 1981/2047 = 96.78% | 5.483165 | pass | 87.1 ms/token, 11.48 tok/s |
 
-Top-1 is not monotone in the share (30% above 35%), a spread of 7 positions in 2047. 30% has not been run free-running.
+Top-1 falls with the share (1999, 1988, 1981). 30% has not been run free-running.
