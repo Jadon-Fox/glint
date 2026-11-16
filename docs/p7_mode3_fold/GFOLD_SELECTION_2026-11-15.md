@@ -277,3 +277,62 @@ The floor moves the threshold rule from 57.3% to 82.8% on set A at fewer bytes t
 prefix measured. Given the set B result this is one sample of 12 prompts and is not a ranking.
 
 Open: the byte counter in ephemeral mode; whether first divergences sit at near-tie positions (next section).
+
+## Margin at divergence and margin-triggered re-run (pre-registered 2026-11-16, before any run)
+
+Referent (S103, "guided by what you desire to happen"; S78, the forward pass ends a round): the round's outcome is the chosen
+token. The quantity available at the end of the round, without any label, is the margin: bf16 logit of the chosen token
+minus the largest other logit. Isomorphism under test: in G-fold the control is spent where the constraint is about to
+bind; here plug bytes are spent on the tokens whose choice is about to flip. Delta: G-fold knows the constraint in advance,
+the margin is known only after the cheap pass, so the spend is a second pass on that token (same position, key/value cache
+row overwritten). Agent inference, not an operator statement.
+
+Switches (default off): `GLINT_MARGIN=1` records the margin per generated token; `GLINT_ESC_M100` (threshold x 100) with
+`GLINT_ESC_PCT` re-runs a token at the larger share when its margin is below the threshold (transient ephemeral path).
+
+- **H-M1 (measurement).** At the first divergence of each diverging prompt (contexts still identical), the arm's own margin
+  is small. Pass: a threshold m exists such that >= 90% of first divergences (pooled sets A and B, 35% and 40%) have
+  margin < m while <= 20% of all generated positions before divergence have margin < m. Fail otherwise; a fail means the
+  margin does not locate the flips and re-run by margin is dropped.
+- **H-M2 (mechanism, run only if H-M1 passes).** With m from H-M1 and re-run at 100%, base 35%: pooled 24-prompt tracking
+  passes the rule (prefix >= 20.0, agreement >= 82.5%) on each set separately, at a mean time per token below the uniform
+  45% arm (118.9 ms). Null: either set fails, or the time is not below 118.9 ms.
+- Identity: with `GLINT_MARGIN=1` and no re-run, generated tokens must equal the roll2 runs token for token.
+
+### Results (2026-11-16). Data: `/home/workspace/lakes/p7_glint/gfold_price_20261115/margin/`
+
+Identity: build check 35%/128 positions PPL 74.34960059115652; with `GLINT_MARGIN=1` the four rollouts and both full-plug
+references reproduce the roll2 tokens exactly. Margins are bf16 logit gaps, so they come in steps of 0.125 to 0.25.
+
+**H-M1 PASS.** 25 first divergences (sets A and B, 35% and 40%), arm's own margin x100: 0 (7), 12 (2), 25 (13), 50 (3).
+All are below 0.75; 13.6% of the 1000 generated positions before any divergence are below 0.75. m = 0.75.
+
+**H-M2 NULL.** Base 35%, re-run when margin < 0.75:
+
+| arm | set A prefix / agree | set B prefix / agree | ms/token | tokens re-run |
+|---|---|---|---|---|
+| no re-run | 23.83 / 82.0% no | 17.00 / 61.7% no | 97.2 | 0 |
+| re-run at 100% (pre-registered) | 26.75 / 83.6% yes | 22.50 / 70.8% no | 109.2 / 108.4 | 58 / 54 of 1140 |
+| re-run at 60% (exploratory) | 27.58 / 86.2% yes | 24.42 / 77.1% no | 104.6 / 104.6 | 52 / 56 of 1140 |
+
+Time is below the uniform 45% arm (118.9 ms) but set B fails agreement, so the rule is not met. The divergences left after a
+100% re-run have a re-run margin of 0 to 0.25: the full plug on that token is itself tied, and the earlier context was
+built at 35%.
+
+**Reference margin at the first divergence** (full-plug run's own margin at the position where an arm first differs):
+
+| arm | set A | set B |
+|---|---|---|
+| 35% | 0, 25, 12, 25 | 0, 25, 0, 0, 0, 25, 0, 0, 25 |
+| 40% | 25, 25, 25, 25, 0 | 0, 25, 0, 25, 0, 0, 0 |
+| 35% + re-run 100% | 25, 0, 50 | 0, 0, 0, 0, 0 |
+| 35% + re-run 60% | 25, 0, 50 | 0, 0, 0, 0, 25 |
+
+(x100.) Every first divergence in every arm sits where the reference's top two logits differ by 0.50 or less, and most are
+exact bf16 ties (0) that the argmax breaks by lowest token index. 9.8% of reference positions have margin <= 0.25, 14.2%
+<= 0.50. In 24 prompts no arm departed from the reference at a position where the reference was decided by more than
+0.50. Set B scores worse than set A because more of its prompts reach an exact tie.
+
+Consequence (agent reading, not a ruling): the free-running rule as written scores the outcome of reference ties. A measure
+of stumbles needs the reference's logit for the token the arm chose at the divergence (not yet recorded: this run shows
+the reference was tied between its top two, not that the arm chose one of those two).

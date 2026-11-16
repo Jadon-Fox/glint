@@ -24,7 +24,7 @@ from p7_forward import bf16r, embed_gather, rms_norm_bf16, rope, residual_add, s
 from p7_glint_linear import glint_gemv_warp
 from p7_glint_gemv_fast import glint_gemv_fast
 from p7_glint_gemv_km import glint_gemv_km, gemv_km_combine, GTB
-from p7_decode_fast_kernels import rms_norm_block, logits_warp, ce_argmax_block
+from p7_decode_fast_kernels import rms_norm_block, logits_warp, ce_argmax_block, margin_block
 from p7_attention_split import attention_split_partial, attention_split_combine, NCH
 from p7_select_device import select_topk, gather_rows_d, apply_corr_d, apply_corr_k, transpose_scales, gather_rows_d4, apply_corr_ks, combine_corr, KS, accum_hist, gather_rows_p4, GB, overlap_count, overlap_probe, overlap_age, gather_rows_fix, apply_corr_ksc, apply_corr_kse, pool_lookup, pool_free, pool_assign, apply_corr_ksp
 
@@ -976,6 +976,33 @@ def main() raises:
     for b in getenv("GLINT_ROLL_OFFSET", "0").as_bytes():
         roll_off = roll_off * 10 + Int(b) - 48
     print("MOJO_GLINT_FLOOR pct", floor_pct, "roll_offset", roll_off)
+    # Margin (bf16 logit gap top1 - top2) per token: GLINT_MARGIN=1 records it. GLINT_ESC_M100 > 0 with GLINT_ESC_PCT re-runs a
+    # token at the larger plug share when its margin * 100 is below the threshold (transient ephemeral path only).
+    var mrg_on = getenv("GLINT_MARGIN", "0") == "1"
+    var esc_m100 = 0
+    for b in getenv("GLINT_ESC_M100", "0").as_bytes():
+        esc_m100 = esc_m100 * 10 + Int(b) - 48
+    var esc_pct = 0
+    for b in getenv("GLINT_ESC_PCT", "0").as_bytes():
+        esc_pct = esc_pct * 10 + Int(b) - 48
+    var esc_on = esc_m100 > 0 and esc_pct > 0
+    if esc_on:
+        mrg_on = True
+    var nh_base = List[Int]()
+    var ni_base = List[Int]()
+    for l in range(LAYERS):
+        nh_base.append(nh[l])
+        ni_base.append(ni[l])
+    var k_mrg = ctx.compile_function[margin_block[ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
+    var marg = ctx.enqueue_create_buffer[DType.float32](steps)
+    var m1h = ctx.enqueue_create_host_buffer[DType.float32](1)
+    var margs = List[Float64]()
+    for _ in range(steps):
+        margs.append(0.0)
+    var esc_count = 0
+    var redo = False
+    var itn = 0
+    print("MOJO_GLINT_ESC margin_on", mrg_on, "m100", esc_m100, "pct", esc_pct)
     # Relational price (H-G2r): GLINT_TAU_Q10 = tau * 1024; every linear's threshold is tau * mean|x| of its own input, per token.
     var tau_q10 = 0
     for b in getenv("GLINT_TAU_Q10", "0").as_bytes():
@@ -994,7 +1021,19 @@ def main() raises:
         gen.append(0)
     var t1h = ctx.enqueue_create_host_buffer[DType.int32](1)
     var enq_ns = 0
-    for pos in range(steps):
+    var pos = -1
+    for _it in range(steps * 2):
+        var esc_now = redo
+        redo = False
+        if not esc_now:
+            pos += 1
+        if pos >= steps:
+            break
+        itn += 1
+        if esc_on:
+            for l in range(LAYERS):
+                nh[l] = (esc_pct * H + 99) // 100 if esc_now else nh_base[l]
+                ni[l] = (esc_pct * INTER + 99) // 100 if esc_now else ni_base[l]
         # Free-running rollout (Amendment 3 protocol): 12 prompts of 64 evaluation-text tokens at offsets 0,128,...,1408, then 32 greedy
         # steps; per prompt 95 forward passes (positions 0..94), generated token s is the argmax at position 63+s and is fed at 64+s.
         var q = pos
@@ -1071,7 +1110,7 @@ def main() raises:
                         gs.enqueue_wait_for(ev_in2[lr * 4 + 0])
                         gs.enqueue_function(k_sel, hbf16, idx_b, cnt_b, dummy_log, Int32(0), Int32(H), Int32(nh[lr]), Int32(tk[lr * 4 + 0]), Int32(nfh), grid_dim=1, block_dim=1024)
                         if eph2:
-                            gs.enqueue_function(k_gatx, plugk_w[lr * 4 + 0], idx_b, cnt_b, stg32[(lr % rslots) * 4 + 0], ovl_flags, Int32(nout[0] // 8), Int32(((lr % rslots) * 4 + 0) * INTER), Int32((pos * LAYERS + lr) * 2 + 1000), Int32(reuse_win), grid_dim=GB, block_dim=128)
+                            gs.enqueue_function(k_gatx, plugk_w[lr * 4 + 0], idx_b, cnt_b, stg32[(lr % rslots) * 4 + 0], ovl_flags, Int32(nout[0] // 8), Int32(((lr % rslots) * 4 + 0) * INTER), Int32((itn * LAYERS + lr) * 2 + 1000), Int32(reuse_win), grid_dim=GB, block_dim=128)
                         else:
                             gs.enqueue_function(k_corrkse, hk_v[lr * 4 + 0], sk_v[lr * 4 + 0], dltb, hbf, idx_b, cst[lr * 4 + 0], cnt_b, part_buf, Int32(QKV), Int32(H), grid_dim=(ceildiv(QKV, 128), KS), block_dim=128)
                         gs.record_event(ev_cd[lr * 4 + 0])
@@ -1095,7 +1134,7 @@ def main() raises:
                         gs.enqueue_wait_for(ev_in2[lr * 4 + 1])
                         gs.enqueue_function(k_sel, attnb16, idx_b, cnt_b, dummy_log, Int32(0), Int32(H), Int32(nh[lr]), Int32(tk[lr * 4 + 1]), Int32(nfh), grid_dim=1, block_dim=1024)
                         if eph2:
-                            gs.enqueue_function(k_gatx, plugk_w[lr * 4 + 1], idx_b, cnt_b, stg32[(lr % rslots) * 4 + 1], ovl_flags, Int32(nout[1] // 8), Int32(((lr % rslots) * 4 + 1) * INTER), Int32((pos * LAYERS + lr) * 2 + 1000), Int32(reuse_win), grid_dim=GB, block_dim=128)
+                            gs.enqueue_function(k_gatx, plugk_w[lr * 4 + 1], idx_b, cnt_b, stg32[(lr % rslots) * 4 + 1], ovl_flags, Int32(nout[1] // 8), Int32(((lr % rslots) * 4 + 1) * INTER), Int32((itn * LAYERS + lr) * 2 + 1000), Int32(reuse_win), grid_dim=GB, block_dim=128)
                         else:
                             gs.enqueue_function(k_corrkse, hk_v[lr * 4 + 1], sk_v[lr * 4 + 1], dltb, attnb, idx_b, cst[lr * 4 + 1], cnt_b, part_buf, Int32(H), Int32(H), grid_dim=(ceildiv(H, 128), KS), block_dim=128)
                         gs.record_event(ev_cd[lr * 4 + 1])
@@ -1117,7 +1156,7 @@ def main() raises:
                         gs.enqueue_wait_for(ev_in2[lr * 4 + 2])
                         gs.enqueue_function(k_sel, hbf16, idx_b, cnt_b, dummy_log, Int32(0), Int32(H), Int32(nh[lr]), Int32(tk[lr * 4 + 2]), Int32(nfh), grid_dim=1, block_dim=1024)
                         if eph2:
-                            gs.enqueue_function(k_gatx, plugk_w[lr * 4 + 2], idx_b, cnt_b, stg32[(lr % rslots) * 4 + 2], ovl_flags, Int32(nout[2] // 8), Int32(((lr % rslots) * 4 + 2) * INTER), Int32((pos * LAYERS + lr) * 2 + 1000), Int32(reuse_win), grid_dim=GB, block_dim=128)
+                            gs.enqueue_function(k_gatx, plugk_w[lr * 4 + 2], idx_b, cnt_b, stg32[(lr % rslots) * 4 + 2], ovl_flags, Int32(nout[2] // 8), Int32(((lr % rslots) * 4 + 2) * INTER), Int32((itn * LAYERS + lr) * 2 + 1000), Int32(reuse_win), grid_dim=GB, block_dim=128)
                         else:
                             gs.enqueue_function(k_corrkse, hk_v[lr * 4 + 2], sk_v[lr * 4 + 2], dltb, hbf, idx_b, cst[lr * 4 + 2], cnt_b, part_buf, Int32(2 * INTER), Int32(H), grid_dim=(ceildiv(2 * INTER, 128), KS), block_dim=128)
                         gs.record_event(ev_cd[lr * 4 + 2])
@@ -1138,7 +1177,7 @@ def main() raises:
                         gs.enqueue_wait_for(ev_in2[lr * 4 + 3])
                         gs.enqueue_function(k_sel, actb16, idx_b, cnt_b, dummy_log, Int32(0), Int32(INTER), Int32(ni[lr]), Int32(tk[lr * 4 + 3]), Int32(nfi), grid_dim=1, block_dim=1024)
                         if eph2:
-                            gs.enqueue_function(k_gatx, plugk_w[lr * 4 + 3], idx_b, cnt_b, stg32[(lr % rslots) * 4 + 3], ovl_flags, Int32(nout[3] // 8), Int32(((lr % rslots) * 4 + 3) * INTER), Int32((pos * LAYERS + lr) * 2 + 1000), Int32(reuse_win), grid_dim=GB, block_dim=128)
+                            gs.enqueue_function(k_gatx, plugk_w[lr * 4 + 3], idx_b, cnt_b, stg32[(lr % rslots) * 4 + 3], ovl_flags, Int32(nout[3] // 8), Int32(((lr % rslots) * 4 + 3) * INTER), Int32((itn * LAYERS + lr) * 2 + 1000), Int32(reuse_win), grid_dim=GB, block_dim=128)
                         else:
                             gs.enqueue_function(k_corrkse, hk_v[lr * 4 + 3], sk_v[lr * 4 + 3], dltb, actb, idx_b, cst[lr * 4 + 3], cnt_b, part_buf, Int32(H), Int32(INTER), grid_dim=(ceildiv(H, 128), KS), block_dim=128)
                         gs.record_event(ev_cd[lr * 4 + 3])
@@ -1670,9 +1709,20 @@ def main() raises:
                 ks.enqueue_function(k_cef, lg, tv, lv, t1v, Int32(1), grid_dim=1, block_dim=256)
         else:
             ks.enqueue_function(k_ce, lg, tv, lv, t1v, Int32(1), grid_dim=1, block_dim=1)
+        var mv = DeviceBuffer[DType.float32](ctx, marg.unsafe_ptr().unsafe_offset(pos), 1, owning=False)
+        if mrg_on:
+            ks.enqueue_function(k_mrg, lg, t1v, mv, grid_dim=1, block_dim=256)
         enq_ns += Int(perf_counter_ns() - t_tok0)
         ks.synchronize()
         ctx.synchronize()
+        if mrg_on and (not roll or q >= 63):
+            ctx.enqueue_copy(dst_buf=m1h, src_buf=mv)
+            ctx.synchronize()
+            margs[pos] = Float64(m1h[0])
+            if esc_on and not esc_now and Float64(m1h[0]) * 100.0 < Float64(esc_m100):
+                redo = True
+                esc_count += 1
+                continue
         if roll and q >= 63:
             ctx.enqueue_copy(dst_buf=t1h, src_buf=t1v)
             ctx.synchronize()
@@ -1797,6 +1847,14 @@ def main() raises:
             matches += 1
         if not roll:
             print("MOJO_GLINT_SELECT_POSITION", pos, Int(th[pos]), Float64(lh[pos]))
+    if mrg_on:
+        print("MOJO_GLINT_ESC escalated_tokens", esc_count, "of", steps)
+        if roll:
+            for pi in range(12):
+                var ml = String("MOJO_MARGIN prompt ") + String(pi) + String(" m100")
+                for si in range(32):
+                    ml += String(" ") + String(Int(margs[pi * 95 + 63 + si] * 100.0))
+                print(ml)
     if roll:
         for pi in range(12):
             var line = String("MOJO_ROLL prompt ") + String(pi) + String(" tokens")
