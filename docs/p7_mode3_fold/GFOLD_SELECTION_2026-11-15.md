@@ -392,7 +392,7 @@ Data: `margin/{A,B}_m20.log`, `{A,B}_m15.log`, `{A,B}_ref100alt3.log`, `gate_tr_
 
 | share | gate top-1 | gate PPL | gate | ms/token (gate) | first divergences (24 prompts) | reference gap to the arm's token | above 0.50 |
 |---|---|---|---|---|---|---|---|
-| 40% | 1999/2047 = 97.66% | 5.476149 | pass | 109.0 | 12 | all <= 0.25 | 0 |
+| 40% | 1999/2047 = 97.66% | 5.476149 | pass | 109.0 | 12 | all <= 0.50 | 0 |
 | 35% | 1988/2047 = 97.12% | 5.479107 | pass | 98.2 | 13 | all <= 0.50 | 0 |
 | 30% | 1981/2047 = 96.78% | 5.483165 | pass | 87.2 | 15 | all <= 0.50 | 0 |
 | 25% | 1979/2047 = 96.68% | 5.476430 | pass | 76.3 | 16 | all <= 0.50 | 0 |
