@@ -221,6 +221,20 @@ Findings:
 2. The relational price rule FAILS free-running: 57.3% agreement against 89.6% for the uniform fraction at the same bytes, although the two were within one position of 2047 on the teacher-forced gate. So H-G3 is falsified for the relational rule, and the teacher-forced gate did not predict tracking here. What the uniform rule guarantees and the threshold rule does not is a fixed share of every linear at every token; that is the candidate explanation and it is not tested.
 3. No arm in this batch reaches 10 tok/s on today's machine state.
 
+### Transient-staging ephemeral plug, 2026-11-15/16
+`GLINT_EPHEMERAL=2` with `ahead`: no skeleton. The real pass selects its true channels; the rows for ONE linear are fetched to a slot on the fetch stream while that linear's fold GEMV runs, applied, and the slot is overwritten by the next layer (one slot per linear type, about 50 MB in all, against the 4-layer ring of about 200 MB). Uniform 40%, 512 positions, alternating runs, peak card memory by nvidia-smi at 1 s (idle 608-614 MiB before each run). `lakes/p7_glint/gfold_price_20261115/eph5/`, `eph6/`, `eph7/`.
+
+| Path | ms/token | Peak card MiB | Outputs |
+|---|---|---|---|
+| staged + skeleton (`ahead`) | 110.5, 110.8, 111.4, 111.5 | 4546 | reference (PPL 37.305394711155124, 485/512) |
+| ephemeral, direct host read (`=1`) | 122.0 | 4352 | identical |
+| ephemeral, transient, 4-slot ring | 108.0, 107.8 | not sampled | identical |
+| ephemeral, transient, 1 slot per linear | 108.0, 108.3 | 4402 | identical |
+
+Discarded: a first one-slot run gave 65 ms/token with WRONG outputs (PPL 43.1, 404/512). The fetch kernel marks a row with stamp + 1 and consecutive layers share the slot, so the next layer's stamp equalled the mark and its rows were not fetched. Stamps now step by 2 in that path; the table above is after the fix. A batched direct-read kernel (32 channels per step) was slower (157 ms) and was reverted.
+
+Reading: on one GPU the skeleton is not needed. True selection with one fold pass and a one-linear transient slot is 2.5% faster than prediction with two fold passes, with identical outputs, 144 MiB less peak memory, no misses and no late fetches. The direct-read form holds nothing of the plug on the device and is 50 MiB lower still, at 10% lower speed. Skeleton scratch buffers are still allocated in both ephemeral builds.
+
 ## 7. What this does not claim
 
 No measurement. No statement that the tightness theorem holds across layers. No M6 acceptance. The free-running bars remain agent-written and unratified.
