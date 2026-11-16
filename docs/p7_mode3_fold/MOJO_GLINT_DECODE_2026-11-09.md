@@ -427,3 +427,21 @@ Replaces the full-plug channel-addressed staging buffer with a fixed pool of `ca
 | 45% | 25.33 | 84.6% | 9.72 | 9.78 | no (speed: the 727 MB fetch per token now limits it) |
 
 **Reading.** At a 4.7 GiB card peak (3.8 GiB attributable) the 40% arm meets both written criteria (tracks at 89.6%, 10.65 tok/s, one run) and passes the gate. 45% tracks but drops under 10 tok/s because it now re-fetches 727 MB every token; a bounded multi-token row cache (the reuse-distance probe says a 4-token window would serve about 90% of bytes at 45%) is the tier that would restore its speed, and is not built. Rollouts here are one run each. The skeleton still costs a second compute pass per token; it is now concurrent with the real pass on the same GPU, and the speed shows the overlap is partial, not complete.
+
+## Corrections (2026-11-15, found by the full source review)
+
+1. **"CUDA H-TILE decode" label (cross-backend table and the line under it).** The 2047-row CUDA file with PPL 5.473525 and 2007/2047 is `lakes/p7_glint/gate_20261106/align_pin_full`, produced by `run_gate.sh` with `--glint-demand` and `ARM0_DEMAND_F=1`: the demand path (cuBLAS parent plus delta), not the `--glint` H-TILE kernel. No H-TILE 2047-position decode run was found on disk. Read "CUDA H-TILE" in that table as "CUDA demand path, full plug".
+2. **Mojo resident decode, 32 steps.** The text gives 98.8-102.3 ms/token from two runs. A third log on disk, the warp-kernel step-32 run, shows 95.06 ms/token and was not mentioned.
+3. **Boundary sweep left out of the exact-miss fixup section.** `lakes/p7_glint/mojo_roll_fix2_20261114/` and the 50% run of `mojo_roll_fix_20261114/`, re-scored 2026-11-15 with `scripts/p7_roll_score.py` against the same full-plug reference:
+
+| Selection | prefix | agreement | tok/s | tracks |
+|---|---|---|---|---|
+| 30% | 20.67 | 72.4% | 9.67 | no |
+| 32% | 21.17 | 72.9% | 9.96 | no |
+| 33% | 18.83 | 67.2% | 10.12 | no |
+| 37% | 26.50 | 82.8% | 9.22 | yes, by 0.3 points |
+| 50% | 25.33 | 84.6% | 8.85 | yes |
+
+Agreement is not monotone in the fraction (33% is below 30%; 50% is below the 45% arm's 92.4%). With 12 prompts and one run per arm, an arm within a few points of the 82.5% bar is not a stable pass or fail. The 35% result in that section should be read with this table beside it.
+4. **"4.5 GiB target".** The document uses the figure without a source. It came with the operator's ruling of 2026-11-14 (bounded build, target under 4.5 GiB peak on the 3.8B pin).
+5. **Memory figures are not comparable across harnesses.** CUDA `VRAM_USED_MIB` excludes the context, the INT4 runner subtracts a baseline from `cudaMemGetInfo`, and the Mojo figures are nvidia-smi card totals that include the idle desktop. Rollout speeds (context of at most 95 positions) and 2047-position gate speeds (mean context about 1000) are likewise different measurements.
