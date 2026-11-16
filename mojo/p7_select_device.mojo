@@ -337,7 +337,7 @@ def overlap_probe[
 # buffer; the flag only emulates a one-token-lookback cache. Persistent grid of GB blocks, same as gather_rows_p4.
 def gather_rows_fix[
     po: ImmOrigin, io: ImmOrigin, co: ImmOrigin, so: MutOrigin, fo: MutOrigin
-](plugk: ImmPointer[UInt32, po], idx: ImmPointer[Int32, io], cnt: ImmPointer[Int32, co], stage: MutPointer[UInt32, so], flags: MutPointer[Int32, fo], rowwords: Int32, off: Int32, stamp: Int32):
+](plugk: ImmPointer[UInt32, po], idx: ImmPointer[Int32, io], cnt: ImmPointer[Int32, co], stage: MutPointer[UInt32, so], flags: MutPointer[Int32, fo], rowwords: Int32, off: Int32, stamp: Int32, win: Int32):
     var rw = Int(rowwords)
     var n = Int(cnt[unsafe_offset=0])
     var tid = Int(thread_idx.x)
@@ -346,7 +346,7 @@ def gather_rows_fix[
         var c = Int(idx[unsafe_offset=i])
         if tid == 0:
             var f = flags[unsafe_offset=Int(off) + c]
-            if f < stamp:
+            if f < stamp - win:
                 need[unsafe_offset=0] = 1
             else:
                 need[unsafe_offset=0] = 0
