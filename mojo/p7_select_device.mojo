@@ -394,6 +394,51 @@ def apply_corr_ksc[
         acc += (delta[unsafe_offset=h * 16 + p] * scales_k[unsafe_offset=(c >> 6) * nn + r]) * x[unsafe_offset=c].cast[DType.float32]()
     part[unsafe_offset=s * nn + r] = acc
 
+# Ephemeral plug correction (operator, 2026-11-15): apply_corr_ksc with the plug rows read straight from pinned HOST memory.
+# The plain kernel reads one byte per thread, which over the link is one tiny transfer per byte. Here four threads per block
+# each pull one aligned 16-byte vector (32 output rows) into shared memory, then all 128 threads compute from it, so host
+# reads are the same 16-byte pieces the gather kernel uses. Nothing of the plug is written to device memory beyond the block's
+# 64-byte scratch. block_dim must be 128 and n a multiple of 128. Same arithmetic and summation order as apply_corr_ksc.
+def apply_corr_kse[
+    ho: ImmOrigin, so: ImmOrigin, dt: ImmOrigin, xo: ImmOrigin, io: ImmOrigin, go: ImmOrigin, co: ImmOrigin, po: MutOrigin
+](
+    hole_k: ImmPointer[UInt8, ho],
+    scales_k: ImmPointer[Float32, so],
+    delta: ImmPointer[Float32, dt],
+    x: ImmPointer[BFloat16, xo],
+    idx: ImmPointer[Int32, io],
+    plug_host: ImmPointer[UInt8, go],
+    cnt: ImmPointer[Int32, co],
+    part: MutPointer[Float32, po],
+    n: Int32, kdim: Int32,
+):
+    var r = global_idx.x
+    var tid = Int(thread_idx.x)
+    var s = Int(block_idx.y)
+    var nn = Int(n)
+    var half = nn // 2
+    var cn = Int(cnt[unsafe_offset=0])
+    var chunk = (cn + KS - 1) // KS
+    var lo = s * chunk
+    var hi = lo + chunk
+    if hi > cn:
+        hi = cn
+    var sh = stack_allocation[64, UInt8, address_space=AddressSpace.SHARED]()
+    var acc = Float32(0)
+    for i in range(lo, hi):
+        var c = Int(idx[unsafe_offset=i])
+        if (tid & 31) == 0 and r < nn:
+            var v = plug_host.unsafe_offset(c * half + (r >> 1)).load[width=16, alignment=16]()
+            sh.unsafe_offset(tid >> 1).store[alignment=1](v)
+        barrier()
+        if r < nn:
+            var h = Int((hole_k[unsafe_offset=c * half + (r >> 1)] >> UInt8(4 * (r & 1))) & UInt8(15))
+            var p = Int((sh[unsafe_offset=tid >> 1] >> UInt8(4 * (r & 1))) & UInt8(15))
+            acc += (delta[unsafe_offset=h * 16 + p] * scales_k[unsafe_offset=(c >> 6) * nn + r]) * x[unsafe_offset=c].cast[DType.float32]()
+        barrier()
+    if r < nn:
+        part[unsafe_offset=s * nn + r] = acc
+
 # Reuse-distance probe (read-only, "ovl" mode): for each channel this call selects, the number of tokens since the same linear last selected it
 # (flags hold last-selected position + 1001; stamp = position + 1000, so age = stamp - flag + 1, >= 1). hits[16 * slot + age - 1] += 1 for ages 1..16.
 # Run BEFORE overlap_count, which marks the flags for this token.

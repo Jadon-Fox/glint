@@ -176,6 +176,32 @@ The measured link ceiling is 11.2-11.6 GB/s (0.086-0.089 ms per MB). So about fo
 
 Consequence: at a given selection, speed is set by bytes that cross the link per token. The levers that remain are (a) not re-sending rows that are already on the device (the reuse probe says a 4-token window covers about 83% of bytes at 35% and 90% at 45%, as an upper bound), and (b) needing fewer rows for the same tracking. Selection stays the model's own choice; residency only avoids moving the same row twice.
 
+### Reuse of rows already on the device, 2026-11-15
+Whole-token, channel-addressed staging (`...+kgemv`, no `ahead`), uniform 40%, 512 positions, two alternating repeats. `GLINT_REUSE_TOKENS=W` treats a row used within the last W tokens as still resident. `lakes/p7_glint/gfold_price_20261115/reuse/`.
+
+| W | ms/token | Outputs |
+|---|---|---|
+| 0 (every selected row re-sent) | 95.70, 96.42 | reference (PPL 37.305394711155124, 485/512) |
+| 1 | 74.70, 73.93 | identical |
+| 4 | 74.12, 73.48 | identical |
+| 99999 | invalid | PPL 1.6e14: the window made the comparison negative so no row was ever fetched (test bug, discarded) |
+
+Reuse of last token's rows saves about 22 ms per token with identical outputs (13.4-13.5 tok/s at 40%). W = 4 saves under 1 ms more, although the reuse-distance probe says it skips far more bytes; the remaining fetch time is therefore not bytes on the link. Not established what it is (the fetch kernel still scans every selected row, one barrier per row). This arm keeps rows in the 1.6 GB whole-token staging, so it is the speed a cache could reach, not a bounded-VRAM result.
+
+### Ephemeral plug (operator, 2026-11-15)
+`GLINT_EPHEMERAL=1` with `ahead`: no skeleton stream and no staging. The real pass selects its true channels and the correction kernel reads the selected plug rows directly from pinned host memory. Uniform 40%, 512 positions, two alternating repeats per version, each against the staged path in the same batch. `lakes/p7_glint/gfold_price_20261115/eph*/`.
+
+| Path | ms/token | Outputs |
+|---|---|---|
+| staged + skeleton (`ahead`) | 110.6-111.5 (109.1-109.3 with a memory sampler) | reference (PPL 37.305394711155124, 485/512) |
+| ephemeral v1: one byte per thread from host | 241.3, 242.6 | identical |
+| ephemeral v2: 16-byte vector reads (`apply_corr_kse`) | 127.2, 126.8 | identical |
+| ephemeral v3: v2 on a second stream beside the fold GEMV | 121.6, 121.1, 121.7 | identical |
+
+Peak card memory (nvidia-smi, 1 s samples, idle 586 MiB before both): staged 4524 MiB, ephemeral v3 with no staging allocated 4334 MiB (190 MiB less; 3748 MiB attributable).
+
+Reading: the ephemeral plug is exact (same outputs as true same-token selection), needs one fold pass instead of two, has no skeleton, no misses and no plug bytes stored on the device, and is 9% slower than the staged path at 40%. The byte-read shape was most of the first gap (241 -> 127 ms); overlap with the fold GEMV added 5.5 ms. Skeleton scratch buffers are still allocated in this build, so 190 MiB is a lower bound on the saving. The machine carried more background load today (staged 98.5 ms on 2026-11-15 early morning, about 111 ms now); only same-batch comparisons are used.
+
 ## 7. What this does not claim
 
 No measurement. No statement that the tightness theorem holds across layers. No M6 acceptance. The free-running bars remain agent-written and unratified.
