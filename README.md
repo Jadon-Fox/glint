@@ -40,3 +40,5 @@ Encode is **CUDA**: raw BF16 bytes go to the GPU; no Python float walk. That was
 
 INT8 pin stays in [nf4-to-int8](https://github.com/Jadon-Fox/nf4-to-int8) (`--to int8`). Both from BF16; different 256.
 Sim is **done** (offset board). Product is CUDA encode + CUDA expand. GPU evidence workflow: [`GROK_BUILD_GPU_TEST.md`](GROK_BUILD_GPU_TEST.md). Orch wire-up: [`GROK_BUILD_ORCH_GLINT_PROMPT.md`](GROK_BUILD_ORCH_GLINT_PROMPT.md).
+
+**Mojo GLINT KV decode (Project 6, `#116`/`#117`):** runbook and measured results — [`docs/p7_mode3_fold/MOJO_GLINT_DECODE_2026-11-09.md`](docs/p7_mode3_fold/MOJO_GLINT_DECODE_2026-11-09.md). Host recipe: `scripts/p7_mojo_glint_decode.sh` (40-Runtime-Deps container + GPU lease). Selection / VRAM modes: `mojo/p7_glint_select_decode.mojo`, `scripts/p7_mojo_select_retest.sh`.
