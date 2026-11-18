@@ -5,7 +5,7 @@
 # Indices are written in ascending channel order (the correction sums in that order, so results match the host path exactly).
 # The count stays on the device (cnt) and is also logged per linear (cnt_log) for byte accounting.
 # select_topk: grid_dim=1, block_dim=1024, K <= 8192.  gather_rows_d: grid_dim=K, block_dim=128.
-from std.gpu import thread_idx, block_idx, global_idx
+from std.gpu import thread_idx, block_idx, global_idx, grid_dim
 from std.memory import stack_allocation
 from max.gpu.sync import barrier
 from max.gpu.memory import AddressSpace
@@ -371,7 +371,7 @@ def gather_rows_fix[
     var n = Int(cnt[unsafe_offset=0])
     var tid = Int(thread_idx.x)
     var need = stack_allocation[1, Int32, address_space=AddressSpace.SHARED]()
-    for i in range(Int(block_idx.x), n, GB):
+    for i in range(Int(block_idx.x), n, Int(grid_dim.x)):
         var c = Int(idx[unsafe_offset=i])
         if tid == 0:
             var f = flags[unsafe_offset=Int(off) + c]

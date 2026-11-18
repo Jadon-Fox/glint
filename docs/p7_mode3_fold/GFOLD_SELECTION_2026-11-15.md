@@ -533,3 +533,54 @@ plug kernels were guarded by the layer's base share (`nh[l] > 0`), which is 0 wh
 reached them. Data kept at `burn_invalid_guard_bug/` for the record; the coast-only arms are valid (fold alone, forced
 context, rollout positions 0 to 94: 18.9 / 17.8 ms/token). Fix: each guard now tests its own linear's selected count
 `nc[l * 4 + c] > 0`, which equals the old test whenever no window or class mask is set. Sweep re-run follows.
+
+## Transport primitives microbenchmark (2026-11-18)
+
+`mojo/p7_h2d_bench.mojo`, no model, one run, log `/home/workspace/lakes/p7_glint/prims_20261118/h2d_bench.log`. Pinned
+host buffer 256 MiB, scattered offsets, second of two repeats reported.
+
+Copy engine (`enqueue_copy`, one copy per chunk):
+
+| chunk | 1536 B | 2560 B | 8192 B | 64 KiB | 1 MiB | 16 MiB |
+|---|---|---|---|---|---|---|
+| GB/s | 1.03 | 1.56 | 3.81 | 9.16 | 11.58 | 11.83 |
+| us per copy | 1.50 | 1.64 | 2.15 | 7.15 | 90.6 | 1419 |
+
+Zero-copy gather kernel (persistent, 128 threads per block, 16-byte vectors), GB/s by row width and block count:
+
+| row | 1 | 2 | 4 | 8 | 16 | 28 | 56 |
+|---|---|---|---|---|---|---|---|
+| 1536 B (o, down) | 1.44 | 2.79 | 5.30 | **8.38** | 8.25 | 8.17 | 6.30 |
+| 2560 B (qkv) | 2.32 | 4.51 | 8.23 | **9.79** | 7.76 | 6.60 | 6.17 |
+| 8192 B (gate+up) | 6.37 | 11.18 | **11.69** | 11.18 | 10.13 | 7.55 | 7.45 |
+
+Contention: a VRAM-bound read of 1 GiB takes 3.15 ms alone (341 GB/s, 95% of the 360 GB/s rating), and 3.22 to 3.52 ms
+while a zero-copy gather of 100 MB runs on another stream (2 to 56 blocks), and 3.37 ms while the copy engine moves 100 MB
+in 1 MiB chunks.
+
+Readings:
+- **The GPU's memory is not the limit.** A plain streaming kernel reaches 341 GB/s. The decoder's coast path moves about
+  3.04 GB per token in 17.7 to 19.1 ms (159 to 172 GB/s), so its kernels run at about half the card's memory speed.
+- **The gather does not starve compute.** The VRAM kernel slows by at most 12% with any gather running beside it. My
+  2026-11-18 chat claim that fetch and compute "take turns because they share cores" is not supported at the hardware
+  level; any serialization in the decoder comes from its dependencies (each linear's copy waits for its activation, and
+  the correction waits for the copy). The overlap baseline measures that next.
+- **The gather is mis-sized.** The decoder uses 16 blocks for every class. Best is 8 for 1536 and 2560 B rows and 4 for
+  8192 B rows. Byte-weighted (qkv 15.6%, o 9.4%, gate+up 50%, down 25%) that is about 10.0 GB/s against 9.0 GB/s at 16
+  blocks; 9.0 matches the 0.11 ms/MB measured in the decoder. More blocks is slower.
+- **The copy engine cannot move single rows.** About 1.5 us per copy caps it at 1 to 4 GB/s for plug rows; it needs runs
+  of 64 KiB or more (9.2 GB/s) and 1 MiB for the link rate.
+
+### Checked against the Antigravity synthesized design (2026-11-18)
+
+Source (another harness's design, read as data): `/home/jfox/.gemini/antigravity/brain/0014c506-.../scratch/arena-glint-p6/synthesized/`
+and `forge/agent_routing/templates/redesign/glint_p6_mojo_gfold_first_principles.md`.
+
+| claim in that design | measurement | status |
+|---|---|---|
+| A persistent worker of 2 blocks (7.1% of SMs) services prefetch | 2 blocks give 2.8 / 4.5 / 11.2 GB/s for 1536 / 2560 / 8192 B rows | holds for gate+up only; too slow for o, down, qkv unless misses are tiny |
+| The inline 16-block gather steals 57% of SMs from compute | compute slows at most 12% beside 16 or 56 gather blocks | not supported |
+| Copy engine at 11.28 GB/s with 0 SMs | true for 1 MiB+ chunks; 1.0 to 3.8 GB/s for row-sized copies | holds only with host packing into large runs |
+| W = 8 recency covers 95 to 98% of bytes, so a 548 MiB pool cuts link traffic to 20 to 60 MB per token | the 95% is the share of selected bytes last used within 8 tokens (2026-11-14 age probe, unbounded staging). A 548 MiB pool holds 34% of the 1.61 GB plug, about one token's selection at 25 to 35% | untested at that pool size; the window's distinct rows are not measured and are likely far above 548 MiB |
+| Interior shares beat 0/100% burns | attribution test: uniform 20 to 25% beats full-class burns (65 vs 133 ms) | holds on the class axis |
+| o and down anchored near 14 to 15%, never 0 | attribution: full o or down at 15% removes almost no decided flips | the floor is a design choice, not measured; testable with `GLINT_CLASS_PCT` |
