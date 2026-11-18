@@ -1021,6 +1021,35 @@ def main() raises:
             alt.append(cur2)
     var a1h = ctx.enqueue_create_host_buffer[DType.float32](1)
     var a2h = ctx.enqueue_create_host_buffer[DType.float32](1)
+    # Attribution test switches. GLINT_FULL_CLASS = bit mask of linear classes given the full plug (1 qkv, 2 o, 4 gate+up,
+    # 8 down) while the others keep the percent share. GLINT_FORCE_FILE = 12*32 integers: in rollout mode the generated
+    # positions are fed these tokens instead of the run's own argmax, so every position is scored in the same context.
+    var full_mask = 0
+    for b in getenv("GLINT_FULL_CLASS", "0").as_bytes():
+        full_mask = full_mask * 10 + Int(b) - 48
+    var nc = List[Int]()
+    for l in range(LAYERS):
+        for c in range(4):
+            var full = (full_mask >> c) & 1 == 1
+            nc.append((INTER if c == 3 else H) if full else (ni[l] if c == 3 else nh[l]))
+    var frc = List[Int]()
+    var frcp = getenv("GLINT_FORCE_FILE", "")
+    if frcp != "":
+        var cur3 = 0
+        var have3 = False
+        for b in open(frcp, "r").read().as_bytes():
+            if b >= 48 and b <= 57:
+                cur3 = cur3 * 10 + Int(b) - 48
+                have3 = True
+            elif have3:
+                frc.append(cur3)
+                cur3 = 0
+                have3 = False
+        if have3:
+            frc.append(cur3)
+        if len(frc) != 12 * 32:
+            raise Error("GLINT_FORCE_FILE must hold 12*32 integers")
+    print("MOJO_GLINT_ATTR full_class_mask", full_mask, "forced", len(frc) > 0)
     print("MOJO_GLINT_ESC margin_on", mrg_on, "m100", esc_m100, "pct", esc_pct)
     # Relational price (H-G2r): GLINT_TAU_Q10 = tau * 1024; every linear's threshold is tau * mean|x| of its own input, per token.
     var tau_q10 = 0
@@ -1053,6 +1082,9 @@ def main() raises:
             for l in range(LAYERS):
                 nh[l] = (esc_pct * H + 99) // 100 if esc_now else nh_base[l]
                 ni[l] = (esc_pct * INTER + 99) // 100 if esc_now else ni_base[l]
+                for c in range(4):
+                    if (full_mask >> c) & 1 == 0:
+                        nc[l * 4 + c] = ni[l] if c == 3 else nh[l]
         # Free-running rollout (Amendment 3 protocol): 12 prompts of 64 evaluation-text tokens at offsets 0,128,...,1408, then 32 greedy
         # steps; per prompt 95 forward passes (positions 0..94), generated token s is the argmax at position 63+s and is fed at 64+s.
         var q = pos
@@ -1063,7 +1095,7 @@ def main() raises:
             if q < 64:
                 tokh[0] = toks[pi * 128 + roll_off + q]
             else:
-                tokh[0] = Int32(gen[pi * 32 + q - 64])
+                tokh[0] = Int32(frc[pi * 32 + q - 64]) if len(frc) > 0 else Int32(gen[pi * 32 + q - 64])
         else:
             tokh[0] = toks[pos]
         var t_tok0 = perf_counter_ns()
@@ -1086,7 +1118,7 @@ def main() raises:
                     ss.enqueue_function(k_gkm, hk32[l * 4 + 0], sk_v[l * 4 + 0], t0b, hbf_s, part_gs, Int32(QKV), Int32(H), Int32(24), grid_dim=(ceildiv(QKV // 8, GTB), 24), block_dim=GTB)
                     ss.enqueue_function(k_gkc, part_gs, qkv_s, Int32(QKV), Int32(24), grid_dim=ceildiv(QKV, 128), block_dim=128)
                     if nh[l] > 0:
-                        ss.enqueue_function(k_sel, hbf16_s, sidx[par * 128 + l * 4 + 0], scnt[par * 128 + l * 4 + 0], cnt_log, Int32((pos * LAYERS + l) * 4 + 0), Int32(H), Int32(nh[l]), Int32(tk[l * 4 + 0]), Int32(nfh), grid_dim=1, block_dim=1024)
+                        ss.enqueue_function(k_sel, hbf16_s, sidx[par * 128 + l * 4 + 0], scnt[par * 128 + l * 4 + 0], cnt_log, Int32((pos * LAYERS + l) * 4 + 0), Int32(H), Int32(nc[l * 4 + 0]), Int32(tk[l * 4 + 0]), Int32(nfh), grid_dim=1, block_dim=1024)
                         ss.record_event(ev_sel[l * 4 + 0])
                         gs.enqueue_wait_for(ev_sel[l * 4 + 0])
                         gs.enqueue_function(k_gatx, plugk_w[l * 4 + 0], sidx[par * 128 + l * 4 + 0], scnt[par * 128 + l * 4 + 0], stg32[(l % AHEAD_RING) * 4 + 0], ovl_flags, Int32(nout[0] // 8), Int32(((l % AHEAD_RING) * 4 + 0) * INTER), Int32(pos * LAYERS + l + 1000), Int32(reuse_win), grid_dim=GB, block_dim=128)
@@ -1097,7 +1129,7 @@ def main() raises:
                     ss.enqueue_function(k_gkm, hk32[l * 4 + 1], sk_v[l * 4 + 1], t0b, attnb_s, part_gs, Int32(H), Int32(H), Int32(24), grid_dim=(ceildiv(H // 8, GTB), 24), block_dim=GTB)
                     ss.enqueue_function(k_gkc, part_gs, proj_s, Int32(H), Int32(24), grid_dim=ceildiv(H, 128), block_dim=128)
                     if nh[l] > 0:
-                        ss.enqueue_function(k_sel, attnb16_s, sidx[par * 128 + l * 4 + 1], scnt[par * 128 + l * 4 + 1], cnt_log, Int32((pos * LAYERS + l) * 4 + 1), Int32(H), Int32(nh[l]), Int32(tk[l * 4 + 1]), Int32(nfh), grid_dim=1, block_dim=1024)
+                        ss.enqueue_function(k_sel, attnb16_s, sidx[par * 128 + l * 4 + 1], scnt[par * 128 + l * 4 + 1], cnt_log, Int32((pos * LAYERS + l) * 4 + 1), Int32(H), Int32(nc[l * 4 + 1]), Int32(tk[l * 4 + 1]), Int32(nfh), grid_dim=1, block_dim=1024)
                         ss.record_event(ev_sel[l * 4 + 1])
                         gs.enqueue_wait_for(ev_sel[l * 4 + 1])
                         gs.enqueue_function(k_gatx, plugk_w[l * 4 + 1], sidx[par * 128 + l * 4 + 1], scnt[par * 128 + l * 4 + 1], stg32[(l % AHEAD_RING) * 4 + 1], ovl_flags, Int32(nout[1] // 8), Int32(((l % AHEAD_RING) * 4 + 1) * INTER), Int32(pos * LAYERS + l + 1000), Int32(reuse_win), grid_dim=GB, block_dim=128)
@@ -1106,7 +1138,7 @@ def main() raises:
                     ss.enqueue_function(k_gkm, hk32[l * 4 + 2], sk_v[l * 4 + 2], t0b, hbf_s, part_gs, Int32(2 * INTER), Int32(H), Int32(24), grid_dim=(ceildiv(2 * INTER // 8, GTB), 24), block_dim=GTB)
                     ss.enqueue_function(k_gkc, part_gs, gu_s, Int32(2 * INTER), Int32(24), grid_dim=ceildiv(2 * INTER, 128), block_dim=128)
                     if nh[l] > 0:
-                        ss.enqueue_function(k_sel, hbf16_s, sidx[par * 128 + l * 4 + 2], scnt[par * 128 + l * 4 + 2], cnt_log, Int32((pos * LAYERS + l) * 4 + 2), Int32(H), Int32(nh[l]), Int32(tk[l * 4 + 2]), Int32(nfh), grid_dim=1, block_dim=1024)
+                        ss.enqueue_function(k_sel, hbf16_s, sidx[par * 128 + l * 4 + 2], scnt[par * 128 + l * 4 + 2], cnt_log, Int32((pos * LAYERS + l) * 4 + 2), Int32(H), Int32(nc[l * 4 + 2]), Int32(tk[l * 4 + 2]), Int32(nfh), grid_dim=1, block_dim=1024)
                         ss.record_event(ev_sel[l * 4 + 2])
                         gs.enqueue_wait_for(ev_sel[l * 4 + 2])
                         gs.enqueue_function(k_gatx, plugk_w[l * 4 + 2], sidx[par * 128 + l * 4 + 2], scnt[par * 128 + l * 4 + 2], stg32[(l % AHEAD_RING) * 4 + 2], ovl_flags, Int32(nout[2] // 8), Int32(((l % AHEAD_RING) * 4 + 2) * INTER), Int32(pos * LAYERS + l + 1000), Int32(reuse_win), grid_dim=GB, block_dim=128)
@@ -1114,7 +1146,7 @@ def main() raises:
                     ss.enqueue_function(k_gkm, hk32[l * 4 + 3], sk_v[l * 4 + 3], t0b, actb_s, part_gs, Int32(H), Int32(INTER), Int32(32), grid_dim=(ceildiv(H // 8, GTB), 32), block_dim=GTB)
                     ss.enqueue_function(k_gkc, part_gs, down_s, Int32(H), Int32(32), grid_dim=ceildiv(H, 128), block_dim=128)
                     if ni[l] > 0:
-                        ss.enqueue_function(k_sel, actb16_s, sidx[par * 128 + l * 4 + 3], scnt[par * 128 + l * 4 + 3], cnt_log, Int32((pos * LAYERS + l) * 4 + 3), Int32(INTER), Int32(ni[l]), Int32(tk[l * 4 + 3]), Int32(nfi), grid_dim=1, block_dim=1024)
+                        ss.enqueue_function(k_sel, actb16_s, sidx[par * 128 + l * 4 + 3], scnt[par * 128 + l * 4 + 3], cnt_log, Int32((pos * LAYERS + l) * 4 + 3), Int32(INTER), Int32(nc[l * 4 + 3]), Int32(tk[l * 4 + 3]), Int32(nfi), grid_dim=1, block_dim=1024)
                         ss.record_event(ev_sel[l * 4 + 3])
                         gs.enqueue_wait_for(ev_sel[l * 4 + 3])
                         gs.enqueue_function(k_gatx, plugk_w[l * 4 + 3], sidx[par * 128 + l * 4 + 3], scnt[par * 128 + l * 4 + 3], stg32[(l % AHEAD_RING) * 4 + 3], ovl_flags, Int32(nout[3] // 8), Int32(((l % AHEAD_RING) * 4 + 3) * INTER), Int32(pos * LAYERS + l + 1000), Int32(reuse_win), grid_dim=GB, block_dim=128)
@@ -1127,7 +1159,7 @@ def main() raises:
                     if eph and nh[lr] > 0:
                         ks.record_event(ev_in2[lr * 4 + 0])
                         gs.enqueue_wait_for(ev_in2[lr * 4 + 0])
-                        gs.enqueue_function(k_sel, hbf16, idx_b, cnt_b, dummy_log, Int32(0), Int32(H), Int32(nh[lr]), Int32(tk[lr * 4 + 0]), Int32(nfh), grid_dim=1, block_dim=1024)
+                        gs.enqueue_function(k_sel, hbf16, idx_b, cnt_b, dummy_log, Int32(0), Int32(H), Int32(nc[lr * 4 + 0]), Int32(tk[lr * 4 + 0]), Int32(nfh), grid_dim=1, block_dim=1024)
                         if eph2:
                             gs.enqueue_function(k_gatx, plugk_w[lr * 4 + 0], idx_b, cnt_b, stg32[(lr % rslots) * 4 + 0], ovl_flags, Int32(nout[0] // 8), Int32(((lr % rslots) * 4 + 0) * INTER), Int32((itn * LAYERS + lr) * 2 + 1000), Int32(reuse_win), grid_dim=GB, block_dim=128)
                         else:
@@ -1136,7 +1168,7 @@ def main() raises:
                     ks.enqueue_function(k_gkm, hk32[lr * 4 + 0], sk_v[lr * 4 + 0], t0b, hbf, part_g, Int32(QKV), Int32(H), Int32(24), grid_dim=(ceildiv(QKV // 8, GTB), 24), block_dim=GTB)
                     ks.enqueue_function(k_gkc, part_g, qkv, Int32(QKV), Int32(24), grid_dim=ceildiv(QKV, 128), block_dim=128)
                     if nh[lr] > 0:
-                        if not eph: ks.enqueue_function(k_sel, hbf16, idx_b, cnt_b, dummy_log, Int32(0), Int32(H), Int32(nh[lr]), Int32(tk[lr * 4 + 0]), Int32(nfh), grid_dim=1, block_dim=1024)
+                        if not eph: ks.enqueue_function(k_sel, hbf16, idx_b, cnt_b, dummy_log, Int32(0), Int32(H), Int32(nc[lr * 4 + 0]), Int32(tk[lr * 4 + 0]), Int32(nfh), grid_dim=1, block_dim=1024)
                         if not eph: ks.enqueue_function(k_gatx, plugk_w[lr * 4 + 0], idx_b, cnt_b, stg32[(lr % rslots) * 4 + 0], ovl_flags, Int32(nout[0] // 8), Int32(((lr % rslots) * 4 + 0) * INTER), Int32(pos * LAYERS + lr + 1000), Int32(reuse_win), grid_dim=GB, block_dim=128)
                         if eph:
                             ks.enqueue_wait_for(ev_cd[lr * 4 + 0])
@@ -1151,7 +1183,7 @@ def main() raises:
                     if eph and nh[lr] > 0:
                         ks.record_event(ev_in2[lr * 4 + 1])
                         gs.enqueue_wait_for(ev_in2[lr * 4 + 1])
-                        gs.enqueue_function(k_sel, attnb16, idx_b, cnt_b, dummy_log, Int32(0), Int32(H), Int32(nh[lr]), Int32(tk[lr * 4 + 1]), Int32(nfh), grid_dim=1, block_dim=1024)
+                        gs.enqueue_function(k_sel, attnb16, idx_b, cnt_b, dummy_log, Int32(0), Int32(H), Int32(nc[lr * 4 + 1]), Int32(tk[lr * 4 + 1]), Int32(nfh), grid_dim=1, block_dim=1024)
                         if eph2:
                             gs.enqueue_function(k_gatx, plugk_w[lr * 4 + 1], idx_b, cnt_b, stg32[(lr % rslots) * 4 + 1], ovl_flags, Int32(nout[1] // 8), Int32(((lr % rslots) * 4 + 1) * INTER), Int32((itn * LAYERS + lr) * 2 + 1000), Int32(reuse_win), grid_dim=GB, block_dim=128)
                         else:
@@ -1160,7 +1192,7 @@ def main() raises:
                     ks.enqueue_function(k_gkm, hk32[lr * 4 + 1], sk_v[lr * 4 + 1], t0b, attnb, part_g, Int32(H), Int32(H), Int32(24), grid_dim=(ceildiv(H // 8, GTB), 24), block_dim=GTB)
                     ks.enqueue_function(k_gkc, part_g, proj, Int32(H), Int32(24), grid_dim=ceildiv(H, 128), block_dim=128)
                     if nh[lr] > 0:
-                        if not eph: ks.enqueue_function(k_sel, attnb16, idx_b, cnt_b, dummy_log, Int32(0), Int32(H), Int32(nh[lr]), Int32(tk[lr * 4 + 1]), Int32(nfh), grid_dim=1, block_dim=1024)
+                        if not eph: ks.enqueue_function(k_sel, attnb16, idx_b, cnt_b, dummy_log, Int32(0), Int32(H), Int32(nc[lr * 4 + 1]), Int32(tk[lr * 4 + 1]), Int32(nfh), grid_dim=1, block_dim=1024)
                         if not eph: ks.enqueue_function(k_gatx, plugk_w[lr * 4 + 1], idx_b, cnt_b, stg32[(lr % rslots) * 4 + 1], ovl_flags, Int32(nout[1] // 8), Int32(((lr % rslots) * 4 + 1) * INTER), Int32(pos * LAYERS + lr + 1000), Int32(reuse_win), grid_dim=GB, block_dim=128)
                         if eph:
                             ks.enqueue_wait_for(ev_cd[lr * 4 + 1])
@@ -1173,7 +1205,7 @@ def main() raises:
                     if eph and nh[lr] > 0:
                         ks.record_event(ev_in2[lr * 4 + 2])
                         gs.enqueue_wait_for(ev_in2[lr * 4 + 2])
-                        gs.enqueue_function(k_sel, hbf16, idx_b, cnt_b, dummy_log, Int32(0), Int32(H), Int32(nh[lr]), Int32(tk[lr * 4 + 2]), Int32(nfh), grid_dim=1, block_dim=1024)
+                        gs.enqueue_function(k_sel, hbf16, idx_b, cnt_b, dummy_log, Int32(0), Int32(H), Int32(nc[lr * 4 + 2]), Int32(tk[lr * 4 + 2]), Int32(nfh), grid_dim=1, block_dim=1024)
                         if eph2:
                             gs.enqueue_function(k_gatx, plugk_w[lr * 4 + 2], idx_b, cnt_b, stg32[(lr % rslots) * 4 + 2], ovl_flags, Int32(nout[2] // 8), Int32(((lr % rslots) * 4 + 2) * INTER), Int32((itn * LAYERS + lr) * 2 + 1000), Int32(reuse_win), grid_dim=GB, block_dim=128)
                         else:
@@ -1182,7 +1214,7 @@ def main() raises:
                     ks.enqueue_function(k_gkm, hk32[lr * 4 + 2], sk_v[lr * 4 + 2], t0b, hbf, part_g, Int32(2 * INTER), Int32(H), Int32(24), grid_dim=(ceildiv(2 * INTER // 8, GTB), 24), block_dim=GTB)
                     ks.enqueue_function(k_gkc, part_g, gu, Int32(2 * INTER), Int32(24), grid_dim=ceildiv(2 * INTER, 128), block_dim=128)
                     if nh[lr] > 0:
-                        if not eph: ks.enqueue_function(k_sel, hbf16, idx_b, cnt_b, dummy_log, Int32(0), Int32(H), Int32(nh[lr]), Int32(tk[lr * 4 + 2]), Int32(nfh), grid_dim=1, block_dim=1024)
+                        if not eph: ks.enqueue_function(k_sel, hbf16, idx_b, cnt_b, dummy_log, Int32(0), Int32(H), Int32(nc[lr * 4 + 2]), Int32(tk[lr * 4 + 2]), Int32(nfh), grid_dim=1, block_dim=1024)
                         if not eph: ks.enqueue_function(k_gatx, plugk_w[lr * 4 + 2], idx_b, cnt_b, stg32[(lr % rslots) * 4 + 2], ovl_flags, Int32(nout[2] // 8), Int32(((lr % rslots) * 4 + 2) * INTER), Int32(pos * LAYERS + lr + 1000), Int32(reuse_win), grid_dim=GB, block_dim=128)
                         if eph:
                             ks.enqueue_wait_for(ev_cd[lr * 4 + 2])
@@ -1194,7 +1226,7 @@ def main() raises:
                     if eph and ni[lr] > 0:
                         ks.record_event(ev_in2[lr * 4 + 3])
                         gs.enqueue_wait_for(ev_in2[lr * 4 + 3])
-                        gs.enqueue_function(k_sel, actb16, idx_b, cnt_b, dummy_log, Int32(0), Int32(INTER), Int32(ni[lr]), Int32(tk[lr * 4 + 3]), Int32(nfi), grid_dim=1, block_dim=1024)
+                        gs.enqueue_function(k_sel, actb16, idx_b, cnt_b, dummy_log, Int32(0), Int32(INTER), Int32(nc[lr * 4 + 3]), Int32(tk[lr * 4 + 3]), Int32(nfi), grid_dim=1, block_dim=1024)
                         if eph2:
                             gs.enqueue_function(k_gatx, plugk_w[lr * 4 + 3], idx_b, cnt_b, stg32[(lr % rslots) * 4 + 3], ovl_flags, Int32(nout[3] // 8), Int32(((lr % rslots) * 4 + 3) * INTER), Int32((itn * LAYERS + lr) * 2 + 1000), Int32(reuse_win), grid_dim=GB, block_dim=128)
                         else:
@@ -1203,7 +1235,7 @@ def main() raises:
                     ks.enqueue_function(k_gkm, hk32[lr * 4 + 3], sk_v[lr * 4 + 3], t0b, actb, part_g, Int32(H), Int32(INTER), Int32(32), grid_dim=(ceildiv(H // 8, GTB), 32), block_dim=GTB)
                     ks.enqueue_function(k_gkc, part_g, down, Int32(H), Int32(32), grid_dim=ceildiv(H, 128), block_dim=128)
                     if ni[lr] > 0:
-                        if not eph: ks.enqueue_function(k_sel, actb16, idx_b, cnt_b, dummy_log, Int32(0), Int32(INTER), Int32(ni[lr]), Int32(tk[lr * 4 + 3]), Int32(nfi), grid_dim=1, block_dim=1024)
+                        if not eph: ks.enqueue_function(k_sel, actb16, idx_b, cnt_b, dummy_log, Int32(0), Int32(INTER), Int32(nc[lr * 4 + 3]), Int32(tk[lr * 4 + 3]), Int32(nfi), grid_dim=1, block_dim=1024)
                         if not eph: ks.enqueue_function(k_gatx, plugk_w[lr * 4 + 3], idx_b, cnt_b, stg32[(lr % rslots) * 4 + 3], ovl_flags, Int32(nout[3] // 8), Int32(((lr % rslots) * 4 + 3) * INTER), Int32(pos * LAYERS + lr + 1000), Int32(reuse_win), grid_dim=GB, block_dim=128)
                         if eph:
                             ks.enqueue_wait_for(ev_cd[lr * 4 + 3])
@@ -1254,7 +1286,7 @@ def main() raises:
                     ks.enqueue_function(k_gemv, wq_v[l * 4 + 0], wq_v[l * 4 + 0], sw_v[l * 4 + 0], t0b, hbf, qkv, Int32(QKV), Int32(H), grid_dim=ceildiv(QKV, 4), block_dim=128)
                 if stale and nh[l] > 0:
                     if (not skel) or phase == 0:
-                        ks.enqueue_function(k_sel, hbf16, sidx[par * 128 + l * 4 + 0], scnt[par * 128 + l * 4 + 0], cnt_log, Int32((pos * LAYERS + l) * 4 + 0), Int32(H), Int32(nh[l]), Int32(tk[l * 4 + 0]), Int32(nfh), grid_dim=1, block_dim=1024)
+                        ks.enqueue_function(k_sel, hbf16, sidx[par * 128 + l * 4 + 0], scnt[par * 128 + l * 4 + 0], cnt_log, Int32((pos * LAYERS + l) * 4 + 0), Int32(H), Int32(nc[l * 4 + 0]), Int32(tk[l * 4 + 0]), Int32(nfh), grid_dim=1, block_dim=1024)
                         if ovl and skel and phase == 0:
                             ks.enqueue_function(k_age, sidx[par * 128 + l * 4 + 0], scnt[par * 128 + l * 4 + 0], ovl_flags, age_hits, Int32((l * 4 + 0) * INTER), Int32(pos + 1000), Int32((pos * LAYERS + l) * 4 + 0), grid_dim=1, block_dim=1)
                             ks.enqueue_function(k_ovl, sidx[par * 128 + l * 4 + 0], scnt[par * 128 + l * 4 + 0], ovl_flags, ovl_hits, Int32((l * 4 + 0) * INTER), Int32(pos + 1000), Int32((pos * LAYERS + l) * 4 + 0), grid_dim=1, block_dim=1)
@@ -1272,7 +1304,7 @@ def main() raises:
                             gs.enqueue_function(k_gatp, plugk_w[l * 4 + 0], sidx[par * 128 + l * 4 + 0], scnt[par * 128 + l * 4 + 0], stg32[l * 4 + 0], Int32(nout[0] // 8), grid_dim=GB, block_dim=128)
                     else:
                         if fix:
-                            ks.enqueue_function(k_sel, hbf16, idx_b, cnt_b, dummy_log, Int32(0), Int32(H), Int32(nh[l]), Int32(tk[l * 4 + 0]), Int32(nfh), grid_dim=1, block_dim=1024)
+                            ks.enqueue_function(k_sel, hbf16, idx_b, cnt_b, dummy_log, Int32(0), Int32(H), Int32(nc[l * 4 + 0]), Int32(tk[l * 4 + 0]), Int32(nfh), grid_dim=1, block_dim=1024)
                             if pool:
                                 ks.enqueue_function(k_plk, idx_b, cnt_b, so_v[l * 4 + 0], st_v[l * 4 + 0], ms_v[l * 4 + 0], mcn_v[l * 4 + 0], pool_log, Int32(pos + 1), Int32((pos * LAYERS + l) * 8 + 1 * 4 + 0), grid_dim=1, block_dim=1024)
                                 ks.enqueue_function(k_pfr, st_v[l * 4 + 0], Int32(cap_j[0]), Int32(pos + 1), fr_v[l * 4 + 0], fcn_v[l * 4 + 0], grid_dim=1, block_dim=1024)
@@ -1286,7 +1318,7 @@ def main() raises:
                             ks.enqueue_function(k_comb, part_buf, qkv, Int32(QKV), grid_dim=ceildiv(QKV, 128), block_dim=128)
                         else:
                             if ovl and skel:
-                                ks.enqueue_function(k_sel, hbf16, idx_b, cnt_b, dummy_log, Int32(0), Int32(H), Int32(nh[l]), Int32(tk[l * 4 + 0]), Int32(nfh), grid_dim=1, block_dim=1024)
+                                ks.enqueue_function(k_sel, hbf16, idx_b, cnt_b, dummy_log, Int32(0), Int32(H), Int32(nc[l * 4 + 0]), Int32(tk[l * 4 + 0]), Int32(nfh), grid_dim=1, block_dim=1024)
                                 ks.enqueue_function(k_prb, idx_b, cnt_b, ovl_flags, prb_hits, Int32((l * 4 + 0) * INTER), Int32(pos + 1000), Int32((pos * LAYERS + l) * 4 + 0), grid_dim=1, block_dim=1)
                             if ksplit:
                                 ks.enqueue_function(k_corrks, hk_v[l * 4 + 0], sk_v[l * 4 + 0], dltb, hbf, sidx[rd * 128 + l * 4 + 0], stg8[l * 4 + 0], scnt[rd * 128 + l * 4 + 0], part_buf, Int32(QKV), Int32(H), grid_dim=(ceildiv(QKV, 128), KS), block_dim=128)
@@ -1295,7 +1327,7 @@ def main() raises:
                                 ks.enqueue_function(k_corrk, hk_v[l * 4 + 0], sk_v[l * 4 + 0], dltb, hbf, sidx[rd * 128 + l * 4 + 0], stg8[l * 4 + 0], scnt[rd * 128 + l * 4 + 0], qkv, Int32(QKV), Int32(H), grid_dim=ceildiv(QKV, 128), block_dim=128)
                 elif dsel and nh[l] > 0:
                     ctx.stream().enqueue_wait_for(ev_in)
-                    ctx.enqueue_function(k_sel, hbf16, idx_dev, cnt_dev, cnt_log, Int32((pos * LAYERS + l) * 4 + 0), Int32(H), Int32(nh[l]), Int32(tk[l * 4 + 0]), Int32(nfh), grid_dim=1, block_dim=1024)
+                    ctx.enqueue_function(k_sel, hbf16, idx_dev, cnt_dev, cnt_log, Int32((pos * LAYERS + l) * 4 + 0), Int32(H), Int32(nc[l * 4 + 0]), Int32(tk[l * 4 + 0]), Int32(nfh), grid_dim=1, block_dim=1024)
                     if prof:
                         ctx.enqueue_function(k_acc, idx_dev, cnt_dev, hist_d, Int32((((1 if pi >= 6 else 0) * LAYERS + l) * 4 + 0) * INTER), grid_dim=1, block_dim=128)
                     if lyr:
@@ -1376,7 +1408,7 @@ def main() raises:
                     ks.enqueue_function(k_gemv, wq_v[l * 4 + 1], wq_v[l * 4 + 1], sw_v[l * 4 + 1], t0b, attnb, proj, Int32(H), Int32(H), grid_dim=ceildiv(H, 4), block_dim=128)
                 if stale and nh[l] > 0:
                     if (not skel) or phase == 0:
-                        ks.enqueue_function(k_sel, attnb16, sidx[par * 128 + l * 4 + 1], scnt[par * 128 + l * 4 + 1], cnt_log, Int32((pos * LAYERS + l) * 4 + 1), Int32(H), Int32(nh[l]), Int32(tk[l * 4 + 1]), Int32(nfh), grid_dim=1, block_dim=1024)
+                        ks.enqueue_function(k_sel, attnb16, sidx[par * 128 + l * 4 + 1], scnt[par * 128 + l * 4 + 1], cnt_log, Int32((pos * LAYERS + l) * 4 + 1), Int32(H), Int32(nc[l * 4 + 1]), Int32(tk[l * 4 + 1]), Int32(nfh), grid_dim=1, block_dim=1024)
                         if ovl and skel and phase == 0:
                             ks.enqueue_function(k_age, sidx[par * 128 + l * 4 + 1], scnt[par * 128 + l * 4 + 1], ovl_flags, age_hits, Int32((l * 4 + 1) * INTER), Int32(pos + 1000), Int32((pos * LAYERS + l) * 4 + 1), grid_dim=1, block_dim=1)
                             ks.enqueue_function(k_ovl, sidx[par * 128 + l * 4 + 1], scnt[par * 128 + l * 4 + 1], ovl_flags, ovl_hits, Int32((l * 4 + 1) * INTER), Int32(pos + 1000), Int32((pos * LAYERS + l) * 4 + 1), grid_dim=1, block_dim=1)
@@ -1394,7 +1426,7 @@ def main() raises:
                             gs.enqueue_function(k_gatp, plugk_w[l * 4 + 1], sidx[par * 128 + l * 4 + 1], scnt[par * 128 + l * 4 + 1], stg32[l * 4 + 1], Int32(nout[1] // 8), grid_dim=GB, block_dim=128)
                     else:
                         if fix:
-                            ks.enqueue_function(k_sel, attnb16, idx_b, cnt_b, dummy_log, Int32(0), Int32(H), Int32(nh[l]), Int32(tk[l * 4 + 1]), Int32(nfh), grid_dim=1, block_dim=1024)
+                            ks.enqueue_function(k_sel, attnb16, idx_b, cnt_b, dummy_log, Int32(0), Int32(H), Int32(nc[l * 4 + 1]), Int32(tk[l * 4 + 1]), Int32(nfh), grid_dim=1, block_dim=1024)
                             if pool:
                                 ks.enqueue_function(k_plk, idx_b, cnt_b, so_v[l * 4 + 1], st_v[l * 4 + 1], ms_v[l * 4 + 1], mcn_v[l * 4 + 1], pool_log, Int32(pos + 1), Int32((pos * LAYERS + l) * 8 + 1 * 4 + 1), grid_dim=1, block_dim=1024)
                                 ks.enqueue_function(k_pfr, st_v[l * 4 + 1], Int32(cap_j[1]), Int32(pos + 1), fr_v[l * 4 + 1], fcn_v[l * 4 + 1], grid_dim=1, block_dim=1024)
@@ -1408,7 +1440,7 @@ def main() raises:
                             ks.enqueue_function(k_comb, part_buf, proj, Int32(H), grid_dim=ceildiv(H, 128), block_dim=128)
                         else:
                             if ovl and skel:
-                                ks.enqueue_function(k_sel, attnb16, idx_b, cnt_b, dummy_log, Int32(0), Int32(H), Int32(nh[l]), Int32(tk[l * 4 + 1]), Int32(nfh), grid_dim=1, block_dim=1024)
+                                ks.enqueue_function(k_sel, attnb16, idx_b, cnt_b, dummy_log, Int32(0), Int32(H), Int32(nc[l * 4 + 1]), Int32(tk[l * 4 + 1]), Int32(nfh), grid_dim=1, block_dim=1024)
                                 ks.enqueue_function(k_prb, idx_b, cnt_b, ovl_flags, prb_hits, Int32((l * 4 + 1) * INTER), Int32(pos + 1000), Int32((pos * LAYERS + l) * 4 + 1), grid_dim=1, block_dim=1)
                             if ksplit:
                                 ks.enqueue_function(k_corrks, hk_v[l * 4 + 1], sk_v[l * 4 + 1], dltb, attnb, sidx[rd * 128 + l * 4 + 1], stg8[l * 4 + 1], scnt[rd * 128 + l * 4 + 1], part_buf, Int32(H), Int32(H), grid_dim=(ceildiv(H, 128), KS), block_dim=128)
@@ -1417,7 +1449,7 @@ def main() raises:
                                 ks.enqueue_function(k_corrk, hk_v[l * 4 + 1], sk_v[l * 4 + 1], dltb, attnb, sidx[rd * 128 + l * 4 + 1], stg8[l * 4 + 1], scnt[rd * 128 + l * 4 + 1], proj, Int32(H), Int32(H), grid_dim=ceildiv(H, 128), block_dim=128)
                 elif dsel and nh[l] > 0:
                     ctx.stream().enqueue_wait_for(ev_in)
-                    ctx.enqueue_function(k_sel, attnb16, idx_dev, cnt_dev, cnt_log, Int32((pos * LAYERS + l) * 4 + 1), Int32(H), Int32(nh[l]), Int32(tk[l * 4 + 1]), Int32(nfh), grid_dim=1, block_dim=1024)
+                    ctx.enqueue_function(k_sel, attnb16, idx_dev, cnt_dev, cnt_log, Int32((pos * LAYERS + l) * 4 + 1), Int32(H), Int32(nc[l * 4 + 1]), Int32(tk[l * 4 + 1]), Int32(nfh), grid_dim=1, block_dim=1024)
                     if prof:
                         ctx.enqueue_function(k_acc, idx_dev, cnt_dev, hist_d, Int32((((1 if pi >= 6 else 0) * LAYERS + l) * 4 + 1) * INTER), grid_dim=1, block_dim=128)
                     if lyr:
@@ -1494,7 +1526,7 @@ def main() raises:
                     ks.enqueue_function(k_gemv, wq_v[l * 4 + 2], wq_v[l * 4 + 2], sw_v[l * 4 + 2], t0b, hbf, gu, Int32(2 * INTER), Int32(H), grid_dim=ceildiv(2 * INTER, 4), block_dim=128)
                 if stale and nh[l] > 0:
                     if (not skel) or phase == 0:
-                        ks.enqueue_function(k_sel, hbf16, sidx[par * 128 + l * 4 + 2], scnt[par * 128 + l * 4 + 2], cnt_log, Int32((pos * LAYERS + l) * 4 + 2), Int32(H), Int32(nh[l]), Int32(tk[l * 4 + 2]), Int32(nfh), grid_dim=1, block_dim=1024)
+                        ks.enqueue_function(k_sel, hbf16, sidx[par * 128 + l * 4 + 2], scnt[par * 128 + l * 4 + 2], cnt_log, Int32((pos * LAYERS + l) * 4 + 2), Int32(H), Int32(nc[l * 4 + 2]), Int32(tk[l * 4 + 2]), Int32(nfh), grid_dim=1, block_dim=1024)
                         if ovl and skel and phase == 0:
                             ks.enqueue_function(k_age, sidx[par * 128 + l * 4 + 2], scnt[par * 128 + l * 4 + 2], ovl_flags, age_hits, Int32((l * 4 + 2) * INTER), Int32(pos + 1000), Int32((pos * LAYERS + l) * 4 + 2), grid_dim=1, block_dim=1)
                             ks.enqueue_function(k_ovl, sidx[par * 128 + l * 4 + 2], scnt[par * 128 + l * 4 + 2], ovl_flags, ovl_hits, Int32((l * 4 + 2) * INTER), Int32(pos + 1000), Int32((pos * LAYERS + l) * 4 + 2), grid_dim=1, block_dim=1)
@@ -1512,7 +1544,7 @@ def main() raises:
                             gs.enqueue_function(k_gatp, plugk_w[l * 4 + 2], sidx[par * 128 + l * 4 + 2], scnt[par * 128 + l * 4 + 2], stg32[l * 4 + 2], Int32(nout[2] // 8), grid_dim=GB, block_dim=128)
                     else:
                         if fix:
-                            ks.enqueue_function(k_sel, hbf16, idx_b, cnt_b, dummy_log, Int32(0), Int32(H), Int32(nh[l]), Int32(tk[l * 4 + 2]), Int32(nfh), grid_dim=1, block_dim=1024)
+                            ks.enqueue_function(k_sel, hbf16, idx_b, cnt_b, dummy_log, Int32(0), Int32(H), Int32(nc[l * 4 + 2]), Int32(tk[l * 4 + 2]), Int32(nfh), grid_dim=1, block_dim=1024)
                             if pool:
                                 ks.enqueue_function(k_plk, idx_b, cnt_b, so_v[l * 4 + 2], st_v[l * 4 + 2], ms_v[l * 4 + 2], mcn_v[l * 4 + 2], pool_log, Int32(pos + 1), Int32((pos * LAYERS + l) * 8 + 1 * 4 + 2), grid_dim=1, block_dim=1024)
                                 ks.enqueue_function(k_pfr, st_v[l * 4 + 2], Int32(cap_j[2]), Int32(pos + 1), fr_v[l * 4 + 2], fcn_v[l * 4 + 2], grid_dim=1, block_dim=1024)
@@ -1526,7 +1558,7 @@ def main() raises:
                             ks.enqueue_function(k_comb, part_buf, gu, Int32(2 * INTER), grid_dim=ceildiv(2 * INTER, 128), block_dim=128)
                         else:
                             if ovl and skel:
-                                ks.enqueue_function(k_sel, hbf16, idx_b, cnt_b, dummy_log, Int32(0), Int32(H), Int32(nh[l]), Int32(tk[l * 4 + 2]), Int32(nfh), grid_dim=1, block_dim=1024)
+                                ks.enqueue_function(k_sel, hbf16, idx_b, cnt_b, dummy_log, Int32(0), Int32(H), Int32(nc[l * 4 + 2]), Int32(tk[l * 4 + 2]), Int32(nfh), grid_dim=1, block_dim=1024)
                                 ks.enqueue_function(k_prb, idx_b, cnt_b, ovl_flags, prb_hits, Int32((l * 4 + 2) * INTER), Int32(pos + 1000), Int32((pos * LAYERS + l) * 4 + 2), grid_dim=1, block_dim=1)
                             if ksplit:
                                 ks.enqueue_function(k_corrks, hk_v[l * 4 + 2], sk_v[l * 4 + 2], dltb, hbf, sidx[rd * 128 + l * 4 + 2], stg8[l * 4 + 2], scnt[rd * 128 + l * 4 + 2], part_buf, Int32(2 * INTER), Int32(H), grid_dim=(ceildiv(2 * INTER, 128), KS), block_dim=128)
@@ -1535,7 +1567,7 @@ def main() raises:
                                 ks.enqueue_function(k_corrk, hk_v[l * 4 + 2], sk_v[l * 4 + 2], dltb, hbf, sidx[rd * 128 + l * 4 + 2], stg8[l * 4 + 2], scnt[rd * 128 + l * 4 + 2], gu, Int32(2 * INTER), Int32(H), grid_dim=ceildiv(2 * INTER, 128), block_dim=128)
                 elif dsel and nh[l] > 0:
                     ctx.stream().enqueue_wait_for(ev_in)
-                    ctx.enqueue_function(k_sel, hbf16, idx_dev, cnt_dev, cnt_log, Int32((pos * LAYERS + l) * 4 + 2), Int32(H), Int32(nh[l]), Int32(tk[l * 4 + 2]), Int32(nfh), grid_dim=1, block_dim=1024)
+                    ctx.enqueue_function(k_sel, hbf16, idx_dev, cnt_dev, cnt_log, Int32((pos * LAYERS + l) * 4 + 2), Int32(H), Int32(nc[l * 4 + 2]), Int32(tk[l * 4 + 2]), Int32(nfh), grid_dim=1, block_dim=1024)
                     if prof:
                         ctx.enqueue_function(k_acc, idx_dev, cnt_dev, hist_d, Int32((((1 if pi >= 6 else 0) * LAYERS + l) * 4 + 2) * INTER), grid_dim=1, block_dim=128)
                     if lyr:
@@ -1607,7 +1639,7 @@ def main() raises:
                     ks.enqueue_function(k_gemv, wq_v[l * 4 + 3], wq_v[l * 4 + 3], sw_v[l * 4 + 3], t0b, actb, down, Int32(H), Int32(INTER), grid_dim=ceildiv(H, 4), block_dim=128)
                 if stale and ni[l] > 0:
                     if (not skel) or phase == 0:
-                        ks.enqueue_function(k_sel, actb16, sidx[par * 128 + l * 4 + 3], scnt[par * 128 + l * 4 + 3], cnt_log, Int32((pos * LAYERS + l) * 4 + 3), Int32(INTER), Int32(ni[l]), Int32(tk[l * 4 + 3]), Int32(nfi), grid_dim=1, block_dim=1024)
+                        ks.enqueue_function(k_sel, actb16, sidx[par * 128 + l * 4 + 3], scnt[par * 128 + l * 4 + 3], cnt_log, Int32((pos * LAYERS + l) * 4 + 3), Int32(INTER), Int32(nc[l * 4 + 3]), Int32(tk[l * 4 + 3]), Int32(nfi), grid_dim=1, block_dim=1024)
                         if ovl and skel and phase == 0:
                             ks.enqueue_function(k_age, sidx[par * 128 + l * 4 + 3], scnt[par * 128 + l * 4 + 3], ovl_flags, age_hits, Int32((l * 4 + 3) * INTER), Int32(pos + 1000), Int32((pos * LAYERS + l) * 4 + 3), grid_dim=1, block_dim=1)
                             ks.enqueue_function(k_ovl, sidx[par * 128 + l * 4 + 3], scnt[par * 128 + l * 4 + 3], ovl_flags, ovl_hits, Int32((l * 4 + 3) * INTER), Int32(pos + 1000), Int32((pos * LAYERS + l) * 4 + 3), grid_dim=1, block_dim=1)
@@ -1625,7 +1657,7 @@ def main() raises:
                             gs.enqueue_function(k_gatp, plugk_w[l * 4 + 3], sidx[par * 128 + l * 4 + 3], scnt[par * 128 + l * 4 + 3], stg32[l * 4 + 3], Int32(nout[3] // 8), grid_dim=GB, block_dim=128)
                     else:
                         if fix:
-                            ks.enqueue_function(k_sel, actb16, idx_b, cnt_b, dummy_log, Int32(0), Int32(INTER), Int32(ni[l]), Int32(tk[l * 4 + 3]), Int32(nfi), grid_dim=1, block_dim=1024)
+                            ks.enqueue_function(k_sel, actb16, idx_b, cnt_b, dummy_log, Int32(0), Int32(INTER), Int32(nc[l * 4 + 3]), Int32(tk[l * 4 + 3]), Int32(nfi), grid_dim=1, block_dim=1024)
                             if pool:
                                 ks.enqueue_function(k_plk, idx_b, cnt_b, so_v[l * 4 + 3], st_v[l * 4 + 3], ms_v[l * 4 + 3], mcn_v[l * 4 + 3], pool_log, Int32(pos + 1), Int32((pos * LAYERS + l) * 8 + 1 * 4 + 3), grid_dim=1, block_dim=1024)
                                 ks.enqueue_function(k_pfr, st_v[l * 4 + 3], Int32(cap_j[3]), Int32(pos + 1), fr_v[l * 4 + 3], fcn_v[l * 4 + 3], grid_dim=1, block_dim=1024)
@@ -1639,7 +1671,7 @@ def main() raises:
                             ks.enqueue_function(k_comb, part_buf, down, Int32(H), grid_dim=ceildiv(H, 128), block_dim=128)
                         else:
                             if ovl and skel:
-                                ks.enqueue_function(k_sel, actb16, idx_b, cnt_b, dummy_log, Int32(0), Int32(INTER), Int32(ni[l]), Int32(tk[l * 4 + 3]), Int32(nfi), grid_dim=1, block_dim=1024)
+                                ks.enqueue_function(k_sel, actb16, idx_b, cnt_b, dummy_log, Int32(0), Int32(INTER), Int32(nc[l * 4 + 3]), Int32(tk[l * 4 + 3]), Int32(nfi), grid_dim=1, block_dim=1024)
                                 ks.enqueue_function(k_prb, idx_b, cnt_b, ovl_flags, prb_hits, Int32((l * 4 + 3) * INTER), Int32(pos + 1000), Int32((pos * LAYERS + l) * 4 + 3), grid_dim=1, block_dim=1)
                             if ksplit:
                                 ks.enqueue_function(k_corrks, hk_v[l * 4 + 3], sk_v[l * 4 + 3], dltb, actb, sidx[rd * 128 + l * 4 + 3], stg8[l * 4 + 3], scnt[rd * 128 + l * 4 + 3], part_buf, Int32(H), Int32(INTER), grid_dim=(ceildiv(H, 128), KS), block_dim=128)
@@ -1648,7 +1680,7 @@ def main() raises:
                                 ks.enqueue_function(k_corrk, hk_v[l * 4 + 3], sk_v[l * 4 + 3], dltb, actb, sidx[rd * 128 + l * 4 + 3], stg8[l * 4 + 3], scnt[rd * 128 + l * 4 + 3], down, Int32(H), Int32(INTER), grid_dim=ceildiv(H, 128), block_dim=128)
                 elif dsel and ni[l] > 0:
                     ctx.stream().enqueue_wait_for(ev_in)
-                    ctx.enqueue_function(k_sel, actb16, idx_dev, cnt_dev, cnt_log, Int32((pos * LAYERS + l) * 4 + 3), Int32(INTER), Int32(ni[l]), Int32(tk[l * 4 + 3]), Int32(nfi), grid_dim=1, block_dim=1024)
+                    ctx.enqueue_function(k_sel, actb16, idx_dev, cnt_dev, cnt_log, Int32((pos * LAYERS + l) * 4 + 3), Int32(INTER), Int32(nc[l * 4 + 3]), Int32(tk[l * 4 + 3]), Int32(nfi), grid_dim=1, block_dim=1024)
                     if prof:
                         ctx.enqueue_function(k_acc, idx_dev, cnt_dev, hist_d, Int32((((1 if pi >= 6 else 0) * LAYERS + l) * 4 + 3) * INTER), grid_dim=1, block_dim=128)
                     if lyr:

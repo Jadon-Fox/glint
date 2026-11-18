@@ -404,3 +404,40 @@ Data: `margin/{A,B}_m20.log`, `{A,B}_m15.log`, `{A,B}_ref100alt3.log`, `gate_tr_
 - The teacher-forced gate passes at every share down to 15%, so the gate does not see this edge; the reference-gap
   measure does. The old agreement number (50 to 90%) does not see it either: it moves with tie-breaks at every share.
 - 25% is the smallest share with no such departure: 76.3 ms/token (13.1 tok/s) on the gate, 75.4 to 75.7 free-running.
+
+## Attribution test: what does what, and why (pre-registered 2026-11-18, before any run)
+
+Operator direction (2026-11-18, on the M6 rule question): "turn this in to a test what does what and why". This section
+replaces the open choice between the agreement rule and the reference-gap rule with a test. It rules on neither; M6
+stays the operator's.
+
+Why the old measure cannot answer it: free-running agreement stops comparing like with like after the first departure,
+because the contexts differ. Only the first departure per prompt could be scored, about 15 of 768 positions per arm.
+
+**Design.** Every arm is fed the full-plug reference's own generated tokens (`GLINT_FORCE_FILE`), so at all 12 x 32
+generated positions of both prompt sets (768 positions) the arm and the reference see the same context. At each position
+the arm's argmax is compared with the reference token. Every disagreement (a *flip*) is scored by the reference's own
+logit gap between its token and the arm's token (`GLINT_ALT_FILE` on a reference re-run).
+- *Tie flip*: reference gap <= 0.50. The reference itself barely prefers its token.
+- *Decided flip*: reference gap > 0.50. The arm changed a token the reference was sure of. This is the stumble.
+
+**What (inputs varied).**
+1. Plug share s = 15, 20, 25, 30, 35, 40%, all classes at s.
+2. At s = 15%: one linear class at a time gets the full plug (`GLINT_FULL_CLASS` = 1 qkv, 2 o, 4 gate+up, 8 down).
+
+**Does what (outputs).** Tie flips T(s) and decided flips D(s) out of 768 positions; time per token as the stand-in for bytes.
+
+**Why (attribution).**
+- Tie: P(flip | reference margin <= 0.50) against P(flip | reference margin > 0.50), from the reference margins already
+  recorded (`margin/{A,B}_ref100m.log`).
+- Class: the reduction in D(15) per class and per added ms/token. This is the G-fold reading: spend control where it
+  removes the most constraint violation per unit spent. That mapping is agent inference, not an operator statement.
+
+**Rules, written before the runs.**
+- H-A1. D(s) = 0 for s >= 25%, and D(15) > 0. Falsified if D(s) >= 2 at any s >= 25%, or D(15) = 0.
+- H-A2. Flips concentrate on reference ties: P(flip | margin <= 0.50) >= 5 x P(flip | margin > 0.50) at every share.
+  Falsified at any share where the ratio is below 5.
+- H-A3 (exploratory, no prediction about which class). A class *carries* decided flips at 15% if its full plug cuts D(15)
+  by at least half while no other single class does. If two or more do, or none does, the report says so.
+- Sanity. Forced 35% must reproduce the free-running 35% tokens at every position before that prompt's first departure.
+  The build identity check must give PPL 74.34960059115652.
