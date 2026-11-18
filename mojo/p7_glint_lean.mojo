@@ -18,7 +18,7 @@ from p7_glint_gemv_km import glint_gemv_km, gemv_km_combine, GTB
 from p7_decode_fast_kernels import rms_norm_block, logits_warp, ce_argmax_block, margin_block
 from p7_attention_split import attention_split_partial, attention_split_combine, NCH
 from p7_select_device import select_topk, transpose_scales, gather_rows_fix, apply_corr_ksc, combine_corr, KS, GB
-from p7_plug_planes import split_planes, apply_corr_ksc_planes
+from p7_plug_planes import split_planes, apply_corr_ksc_planes, select_topk2, apply_corr_ksc_tier, gather_planes2, apply_corr_ksc_tier_x, combine_corr2
 
 comptime CTX = 2048
 comptime NT = CTX - 1
@@ -245,6 +245,19 @@ def main() raises:
     # GLINT_TIER2_REAL=1: the two-tier plug moves real 2-bit rows. Each linear's K-major plug is also kept as two pinned 2-bit planes
     # (p7_plug_planes.mojo); wide-set channels fetch the HI row, top-set channels the HI and LO rows. Outputs equal the emulation.
     var tier_real = getenv("GLINT_TIER2_REAL", "0") == "1"
+    # GLINT_TIER2_FUSED (on top of GLINT_TIER2_REAL): "sel" = one selection launch for both sets (select_topk2), gathers and
+    # corrections unfused; "x" = also one gather launch (gather_planes2) and one correction + combine with the unfused arithmetic
+    # (apply_corr_ksc_tier_x, combine_corr2); "1" = like x but the correction walks only the wide list (apply_corr_ksc_tier), which
+    # changes the summation order. sel and x are bit-identical to GLINT_TIER2_REAL.
+    var fused_env = getenv("GLINT_TIER2_FUSED", "0")
+    if fused_env != "0" and fused_env != "1" and fused_env != "x" and fused_env != "sel":
+        raise Error("GLINT_TIER2_FUSED must be 0, sel, x or 1")
+    var fused_sel = fused_env != "0"
+    var fused_gat = fused_env == "1" or fused_env == "x"
+    var fused_corr = fused_env == "1"
+    var fused_x = fused_env == "x"
+    if fused_sel and not tier_real:
+        raise Error("GLINT_TIER2_FUSED needs GLINT_TIER2_REAL=1")
     var k_spl = ctx.compile_function[split_planes[ImmUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin]]()
     var plane_hi_host = List[type_of(ctx.enqueue_create_host_buffer[DType.uint8](1))]()
     var plane_lo_host = List[type_of(ctx.enqueue_create_host_buffer[DType.uint8](1))]()
@@ -391,6 +404,11 @@ def main() raises:
     var k_corrksc = ctx.compile_function[apply_corr_ksc[ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
     var k_comb = ctx.compile_function[combine_corr[ImmUntrackedOrigin, MutUntrackedOrigin]]()
     var k_corrpl = ctx.compile_function[apply_corr_ksc_planes[ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
+    var k_sel2 = ctx.compile_function[select_topk2[ImmUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin]]()
+    var k_corrt = ctx.compile_function[apply_corr_ksc_tier[ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
+    var k_gat2 = ctx.compile_function[gather_planes2[ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin]]()
+    var k_corrx = ctx.compile_function[apply_corr_ksc_tier_x[ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin]]()
+    var k_comb2 = ctx.compile_function[combine_corr2[ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
     var k_mk = ctx.compile_function[make_tables[ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin]]()
 
     # parent (NF4) table and cell-minus-parent delta table, built on the device from the pin's own cells
@@ -570,6 +588,7 @@ def main() raises:
     var byte_log = getenv("GLINT_BYTE_LOG", "0") == "1"
     var link_bytes = 0
     var part_buf = ctx.enqueue_create_buffer[DType.float32](KS * 16384)
+    var part_buf2 = ctx.enqueue_create_buffer[DType.float32](KS * 16384 if fused_x else 16)
     var part_g = ctx.enqueue_create_buffer[DType.float32](32 * 16384)
     var hbf16 = DeviceBuffer[DType.uint16](ctx, hbf.unsafe_ptr().unsafe_bitcast[UInt16](), H, owning=False)
     var attnb16 = DeviceBuffer[DType.uint16](ctx, attnb.unsafe_ptr().unsafe_bitcast[UInt16](), H, owning=False)
@@ -653,7 +672,7 @@ def main() raises:
         for c in range(4):
             nc2.append((tier2 * kin[c] + 99) // 100 if tier2 > 0 else 0)
     var idx_t2 = ctx.enqueue_create_buffer[DType.int32](8192)
-    var cnt_t2 = ctx.enqueue_create_buffer[DType.int32](1)
+    var cnt_t2 = ctx.enqueue_create_buffer[DType.int32](2)
     if tier2 > 0:
         var tb = 0
         for l in range(LAYERS):
@@ -668,7 +687,7 @@ def main() raises:
     var nb_arm = nb_top
     if tier2 > 0:
         nb_arm = nb_top // 2 + nb_wide // 2 if tier_real else nb_wide
-    print("MOJO_LINK_BYTES nominal_per_token", nb_arm, "tier_real", tier_real)
+    print("MOJO_LINK_BYTES nominal_per_token", nb_arm, "tier_real", tier_real, "fused", fused_env)
     if len(lay_pct) > 0:
         var lb = 0
         for l in range(LAYERS):
@@ -755,15 +774,22 @@ def main() raises:
                 if nc[i] > 0:
                     ks.record_event(ev_in2[i])
                     gs.enqueue_wait_for(ev_in2[i])
-                    if tier2 > 0:
+                    if fused_sel:
+                        gs.enqueue_function(k_sel2, xin16_c[c], idx_t2, cnt_t2, idxL[i], cntL[i], blog, Int32(LAYERS * 4 + i), Int32(i), Int32(kd), Int32(nc2[i]), Int32(nc[i]), grid_dim=1, block_dim=1024)
+                        if fused_gat:
+                            gs.enqueue_function(k_gat2, phi_w[i], plo_w[i], xin16_c[c], idx_t2, cnt_t2, hst32[c], lst32[c], Int32(n // 16), grid_dim=gbk[c], block_dim=128)
+                        else:
+                            gs.enqueue_function(k_gatx, phi_w[i], idx_t2, cnt_t2, hst32[c], ovl_flags, Int32(n // 16), Int32(c * INTER), Int32((stamp_base + lr) * 2 + 1000), Int32(0), grid_dim=gbk[c], block_dim=128)
+                    elif tier2 > 0:
                         gs.enqueue_function(k_sel, xin16_c[c], idx_t2, cnt_t2, blog, Int32(LAYERS * 4 + i), Int32(kd), Int32(nc2[i]), Int32(0), Int32(0), grid_dim=1, block_dim=1024)
                         if tier_real:
                             gs.enqueue_function(k_gatx, phi_w[i], idx_t2, cnt_t2, hst32[c], ovl_flags, Int32(n // 16), Int32(c * INTER), Int32((stamp_base + lr) * 2 + 1000), Int32(0), grid_dim=gbk[c], block_dim=128)
                         else:
                             gs.enqueue_function(k_gatx, plugk_w[i], idx_t2, cnt_t2, stg32[c], ovl_flags, Int32(n // 8), Int32(c * INTER), Int32((stamp_base + lr) * 2 + 1000), Int32(0), grid_dim=gbk[c], block_dim=128)
-                    gs.enqueue_function(k_sel, xin16_c[c], idxL[i], cntL[i], blog, Int32(i), Int32(kd), Int32(nc[i]), Int32(0), Int32(0), grid_dim=1, block_dim=1024)
+                    if not fused_sel:
+                        gs.enqueue_function(k_sel, xin16_c[c], idxL[i], cntL[i], blog, Int32(i), Int32(kd), Int32(nc[i]), Int32(0), Int32(0), grid_dim=1, block_dim=1024)
                     if tier2 > 0:
-                        if tier_real:
+                        if tier_real and not fused_gat:
                             gs.enqueue_function(k_gatx, plo_w[i], idxL[i], cntL[i], lst32[c], ovl_flags, Int32(n // 16), Int32((LAYERS * 4 + 4 + c) * INTER), Int32((stamp_base + lr) * 2 + 1000), Int32(0), grid_dim=gbk[c], block_dim=128)
                     elif abl_t != 1 and abl_t != 5:
                         if reuse > 0:
@@ -776,7 +802,13 @@ def main() raises:
                 if nc[i] > 0:
                     ks.enqueue_wait_for(ev_cd[i])
                     if abl_t != 4 and abl_t != 5:
-                        if tier_real:
+                        if fused_x:
+                            ks.enqueue_function(k_corrx, hk_v[i], sk_v[i], dltb2, dltbd, xin_c[c], idx_t2, cnt_t2, idxL[i], cntL[i], hst8[c], lst8[c], part_buf, part_buf2, Int32(n), Int32(kd), grid_dim=(ceildiv(n, 128), KS), block_dim=128)
+                            ks.enqueue_function(k_comb2, part_buf, part_buf2, yout_c[c], Int32(n), grid_dim=ceildiv(n, 128), block_dim=128)
+                        elif fused_corr:
+                            ks.enqueue_function(k_corrt, hk_v[i], sk_v[i], dltb2, dltbd, xin_c[c], xin16_c[c], idx_t2, hst8[c], lst8[c], cnt_t2, part_buf, Int32(n), Int32(kd), grid_dim=(ceildiv(n, 128), KS), block_dim=128)
+                            ks.enqueue_function(k_comb, part_buf, yout_c[c], Int32(n), grid_dim=ceildiv(n, 128), block_dim=128)
+                        elif tier_real:
                             ks.enqueue_function(k_corrpl, hk_v[i], sk_v[i], dltb2, xin_c[c], idx_t2, hst8[c], hst8[c], cnt_t2, part_buf, Int32(n), Int32(kd), Int32(0), grid_dim=(ceildiv(n, 128), KS), block_dim=128)
                             ks.enqueue_function(k_comb, part_buf, yout_c[c], Int32(n), grid_dim=ceildiv(n, 128), block_dim=128)
                             ks.enqueue_function(k_corrpl, hk_v[i], sk_v[i], dltbd, xin_c[c], idxL[i], hst8[c], lst8[c], cntL[i], part_buf, Int32(n), Int32(kd), Int32(1), grid_dim=(ceildiv(n, 128), KS), block_dim=128)
