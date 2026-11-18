@@ -584,3 +584,32 @@ and `forge/agent_routing/templates/redesign/glint_p6_mojo_gfold_first_principles
 | W = 8 recency covers 95 to 98% of bytes, so a 548 MiB pool cuts link traffic to 20 to 60 MB per token | the 95% is the share of selected bytes last used within 8 tokens (2026-11-14 age probe, unbounded staging). A 548 MiB pool holds 34% of the 1.61 GB plug, about one token's selection at 25 to 35% | untested at that pool size; the window's distinct rows are not measured and are likely far above 548 MiB |
 | Interior shares beat 0/100% burns | attribution test: uniform 20 to 25% beats full-class burns (65 vs 133 ms) | holds on the class axis |
 | o and down anchored near 14 to 15%, never 0 | attribution: full o or down at 15% removes almost no decided flips | the floor is a design choice, not measured; testable with `GLINT_CLASS_PCT` |
+
+### Burn-window sweep results (2026-11-18, guard fix 293dffc)
+
+Data `burn/`. Forced context, base share 0 (true coast), full plug in layers a..a+7. Scored from the reference's stored
+margins (`glint_attr_score.py quick`; 0 disagreements with the full method on 307 attribution flips), so no reference
+re-runs. Build identity passed.
+
+| arm | set A decided / tie | set B decided / tie | ms/token A / B |
+|---|---|---|---|
+| coast (fold alone) | 11 / 30 | 13 / 29 | 17.6 / 16.8 |
+| burn 0-7 | 4 / 24 | 8 / 22 | 66.4 / 69.0 |
+| burn 4-11 | 9 / 22 | 9 / 34 | 65.2 / 67.5 |
+| burn 8-15 | 8 / 27 | 13 / 32 | 65.6 / 65.0 |
+| burn 12-19 | 8 / 26 | 9 / 36 | 63.5 / 68.8 |
+| burn 16-23 | 9 / 27 | 10 / 30 | 65.1 / 66.1 |
+| burn 20-27 | 9 / 26 | 13 / 30 | 66.9 / 66.6 |
+| burn 24-31 | 8 / 22 | 13 / 32 | 68.7 / 64.9 |
+| uniform 25% (attribution) | 0 / 13 | 0 / 14 | 65.2 / 67.6 |
+
+- **H-B1 PASS (costate not uniform).** Best window per added ms: layers 0-7 (A 0.143, B 0.096 decided flips removed per
+  ms); worst windows remove 2 per 48 ms on A and none on B. Ratio >= 3.4, above the 2x rule. The first layers matter most.
+- **H-B2 not run: the coast/burn plan is refuted.** Every 8-layer window costs about what uniform 25% costs (same bytes)
+  and leaves 4 to 13 decided flips where uniform 25% leaves none. The best window removes only 7 of 11 (A) and 5 of 13 (B)
+  coast flips. Burning full plug in a few layers loses to a thin share in every layer, on the layer axis as on the class
+  axis (attribution: full gate+up at 133 ms vs uniform 25% at 65 ms).
+- So the costate is not concentrated anywhere. Each linear's first channels buy the most landing, in every layer and
+  class: diminishing returns inside every linear. That is the interior (partial-level) case. The Antigravity design's
+  interior-share thesis holds; my coast/burn flight plan does not.
+- Coast alone: 11 / 13 decided flips at 17.6 / 16.8 ms (57 / 60 tok/s). The fold is close but not on the pad.
