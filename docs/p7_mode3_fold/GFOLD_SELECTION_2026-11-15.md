@@ -475,3 +475,39 @@ ms/token. Costate estimate per window = (D(coast) - D(window)) / (ms(window) - m
   Falsified if all windows are within 2x of one another. A uniform costate would mean the uniform share was already right.
 - H-B2. A flight plan that burns only the top windows by costate, at the bytes of uniform 25%, has fewer decided flips
   than uniform 25%. Run only after H-B1 passes.
+
+### Attribution test results (2026-11-18)
+
+Data: `/home/workspace/lakes/p7_glint/gfold_price_20261115/attr/`. Build identity passed (PPL 74.34960059115652). Sanity
+passed: forced 35% reproduces free-running 35% through each prompt's first departure on both sets, and both reference
+scoring runs reproduce the reference tokens. Forced context, 384 positions per set, transient ephemeral plug.
+
+| arm | set A flips (tie / decided) | set B flips (tie / decided) | ms/token A / B |
+|---|---|---|---|
+| 15% | 19 / 3 | 14 / 5 | 49.3 / 50.0 |
+| 20% | 14 / 0 | 12 / 1 | 56.5 / 58.7 |
+| 25% | 13 / 0 | 14 / 0 | 65.2 / 67.6 |
+| 30% | 10 / 0 | 15 / 0 | 77.6 / 76.7 |
+| 35% | 9 / 0 | 16 / 0 | 93.0 / 81.4 |
+| 40% | 8 / 0 | 13 / 0 | 96.7 / 90.4 |
+| 15% + full qkv | 16 / 1 | 18 / 2 | 69.2 / 79.6 |
+| 15% + full o | 20 / 3 | 15 / 3 | 64.9 / 68.1 |
+| 15% + full gate+up | 14 / 0 | 13 / 0 | 133.3 / 140.4 |
+| 15% + full down | 15 / 3 | 14 / 4 | 94.2 / 94.8 |
+
+Decided flips had reference gaps of 0.75 to 3.50 logits (most 1.00).
+
+- **H-A1 PASS.** D = 0 at 25, 30, 35, 40% on both sets; D(15) = 3 and 5. (20% has D = 0 on A and 1 on B.)
+- **H-A2 PASS.** P(flip | reference tie) / P(flip | reference decided) = 41.4 (A) and 15.7 (B) at 15%, 67.4 at 20% B,
+  infinite elsewhere (no decided flips). A reference tie (margin <= 0.50, 14% of positions) is where 16 to 39% of flips
+  happen at every share; tie flips do not fall to zero even at 40%. They are the reference's own coin flips.
+- **H-A3: two classes carry the decided flips.** Full gate+up removes all of them (3 to 0, 5 to 0) and full qkv removes
+  two thirds and three fifths (3 to 1, 5 to 2). o and down remove almost none. Per added ms, qkv removes about 0.10
+  decided flips per ms on both sets and gate+up 0.036 (A) and 0.055 (B): qkv is the more efficient burn per byte,
+  gate+up the more complete.
+- **Full-class burns lose to a small uniform increase.** Uniform 20% (D = 0 / 1) costs 56.5 / 58.7 ms and uniform 25%
+  (D = 0 / 0) costs 65.2 / 67.6 ms. Both beat 15% + full qkv (69 / 80 ms) and 15% + full gate+up (133 / 140 ms).
+  The first extra channels in every linear buy more landing than the last channels of one class. That is diminishing
+  returns within a linear, the condition under which intermediate burn levels pay (operator, "quarter burn").
+- Reading for the planner: the burn should go to qkv and gate+up, at partial levels, not to o and down. The burn-window
+  sweep gives the layer axis.
