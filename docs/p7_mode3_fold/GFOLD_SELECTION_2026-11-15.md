@@ -636,3 +636,34 @@ the identity PPL at 35%.
   "it can't be PCIe" (2026-11-15) is borne out; my 2026-11-15 reading that the link was about 4/5 of marginal byte cost
   was a fit of time against bytes that could not separate the two, because the selection work grows with the share too.
 - Next: decompose those 57 ms with two more timing modes (`GLINT_TIME_ABL=3` selection only, `4` no correction).
+
+### Per-class shares and gather block counts in the decoder (2026-11-18)
+
+Data `/home/workspace/lakes/p7_glint/prims_20261118/` (`summary2.txt`). New build `/tmp/p7_sel2`; identity passed on both
+the staged and the transient path (PPL 74.34960059115652, 120/128).
+
+Gather blocks per class, transient path, 25%, 128 positions, 3 interleaved repeats: 16 blocks 68.8 / 67.9 / 71.6 ms,
+8/8/4/8 blocks 76.5 / 76.3 / 74.7 ms, identical outputs. **Fewer blocks is slower inside the decoder**, against the
+microbenchmark. Each linear moves only 1 to 10 MB, so the copy is latency-bound per linear, not throughput-bound; the
+microbenchmark measured 96 MB bulk transfers. Keep 16. (The class runs below used 8/8/4/8, so their times are
+inflated by about 5 to 8 ms; compare them with the uniform 25% row of the same batch.)
+
+Per-class shares (q, o, gate+up, down percent), forced context, scored from stored reference margins:
+
+| shares q/o/gu/d | share of plug bytes | set A decided / tie | set B decided / tie | ms/token A / B |
+|---|---|---|---|---|
+| 25/25/25/25 | 25.0% | 0 / 13 | 0 / 14 | 75.5 / 76.5 |
+| 25/0/25/0 | 16.4% | 6 / 23 | 7 / 30 | 55.5 / 54.7 |
+| 30/0/30/0 | 19.7% | 6 / 24 | 9 / 29 | 63.9 / 61.8 |
+| 35/0/25/0 | 18.0% | 7 / 22 | 7 / 26 | 57.6 / 58.6 |
+| 25/15/25/15 | 21.6% | 1 / 19 | 2 / 13 | 68.7 / 72.3 |
+| 30/10/30/10 | 23.1% | 0 / 20 | 2 / 19 | 73.7 / 69.1 |
+| 20/10/30/10 | 21.6% | 0 / 20 | 2 / 16 | 71.2 / 67.2 |
+
+(byte shares: qkv 15.6%, o 9.4%, gate+up 50%, down 25% of the plug.)
+- o and down cannot coast: removing them adds 6 to 9 decided flips even with qkv and gate+up raised. The full-o and
+  full-down burns removed almost nothing because they started from 15%, where those classes were already enough.
+- No tested class split beats uniform 25% at equal landing: every split that saves bytes leaves decided flips on at
+  least one set. At this resolution the per-byte costate is close to balanced across classes, so the uniform interior
+  share is already near the G-fold optimum on the class axis. Antigravity's o/down floor of about 15% is consistent
+  with this; its claim that o and down can sit far below qkv and gate+up is not supported at 25% total.
