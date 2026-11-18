@@ -845,3 +845,21 @@ Combined profiles (layers 0-7 / 8-15 / 16-23 / 24-31), same method:
 - Moving bytes from early to late layers does not buy the slack back (10/10/30/30 and 15/15/25/30 fail).
 - So far the smallest landing operating point is one band at 15% with the rest at 25%: 362 MB per token, 10% below
   uniform 25%. The smallest uniform share that lands is being pinned next (21 to 23%).
+
+Uniform shares, same method (data `layer_min3/`):
+
+| uniform share | plug MB per token | decided A / B |
+|---|---|---|
+| 20% | 322 | 0 / 1 |
+| 21% | 338 | 0 / 1 |
+| 22% | 354 | 0 / 2 |
+| 23% | 370 | 0 / 0 |
+| 25% | 403 | 0 / 0 |
+| 25% with one of layers 0-7 or 8-15 at 15% | 362 | 0 / 0 |
+
+- The smallest landing operating point on these 24 prompts is about 362 to 370 MB of plug per token (about 23% of the
+  plug). Below that, set B starts to show a decided flip at single positions, and not monotonically (22% shows 2, 21%
+  shows 1), so the edge is resolved only to about 2 percentage points by 24 prompts.
+- The VRAM side of the plug is already small on the transient path: one channel-addressed slot per class (50 MB), and only
+  the selected rows of one linear are in use at a time (largest: gate+up at 23%, about 5.8 MB). The 362 to 370 MB is link
+  traffic per token, not resident VRAM.
