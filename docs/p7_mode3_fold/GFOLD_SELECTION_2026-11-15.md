@@ -735,3 +735,21 @@ Transient path, 128 positions, 3 repeats, medians.
   would give about max(copy, compute) = 61 / 44 ms per token (16 / 23 tok/s) at the same bytes; fewer fresh bytes per
   token (reuse across tokens) lowers the copy side further. The two levers are overlap (predict and prefetch ahead) and
   reuse (do not re-fetch rows already in VRAM).
+
+### Oracle prefetch: the overlap ceiling (2026-11-18)
+
+`GLINT_ORACLE=1` in the lean decoder (build `/tmp/p7_lean3`, 41 s). Each token runs twice: pass A is the normal path and
+records every linear's true selection; pass B recomputes the token with all 128 plug copies queued at its start into
+per-linear staging slots (1.61 GB, study only), and only pass B is timed. Perfect prediction, full overlap. Outputs
+identical to the normal path at 35% and 25% (all 128 positions). 128 positions, 3 repeats.
+
+| share | normal | oracle pass B | copy alone (decomposition) | fold alone |
+|---|---|---|---|---|
+| 35% | 99.4 / 99.7 / 100.5 | 75.1 / 75.4 / 76.1 | 79.0 | 17.6 |
+| 25% | 76.4 / 76.4 / 76.8 | 56.9 / 57.5 / 57.9 | 62.3 | 17.6 |
+
+- Perfect prefetch saves about 25%: 13.3 tok/s at 35%, 17.4 tok/s at 25% (normal 10.0 / 13.1 under today's load).
+- Pass B is about the copy alone: the link is the floor. Overlap hides the compute behind the copy; it cannot shorten
+  the copy. Prediction alone therefore caps at these numbers, and only fewer link bytes per token go further.
+- Next: cross-token reuse inside the oracle (`GLINT_ORACLE_REUSE=W`: a row fetched into its slot within the last W tokens
+  is not fetched again).

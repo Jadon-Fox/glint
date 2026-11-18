@@ -422,13 +422,44 @@ def main() raises:
         stg8.append(DeviceBuffer[DType.uint8](ctx, stg_all.unsafe_ptr().unsafe_offset(stg_off[j]), kin[j] * nout[j] // 2, owning=False))
         stg32.append(DeviceBuffer[DType.uint32](ctx, stg_all.unsafe_ptr().unsafe_offset(stg_off[j]).unsafe_bitcast[UInt32](), kin[j] * nout[j] // 8, owning=False))
     # Last-fetch stamp per (class, channel). Stamps grow across layers, so with no reuse window every selected row is fetched.
-    var ovl_flags = ctx.enqueue_create_buffer[DType.int32](LAYERS * 4 * INTER)
-    var ovl_zero = ctx.enqueue_create_host_buffer[DType.int32](LAYERS * 4 * INTER)
-    for i in range(LAYERS * 4 * INTER):
+    # GLINT_ORACLE=1 (timing study): every token runs twice. Pass A is the normal path and records each linear's true selection;
+    # pass B recomputes the token with all 128 plug copies queued at its start (perfect prediction, full overlap). Only pass B is
+    # timed as MOJO_ORACLE; outputs come from pass B and must equal the normal path. Needs a per-linear staging slot (whole plug).
+    var oracle = getenv("GLINT_ORACLE", "0") == "1"
+    # GLINT_ORACLE_REUSE = W tokens: in pass B a row already fetched into its linear's slot within the last W tokens is not
+    # fetched again (plug rows never change, so outputs cannot change; only link bytes drop).
+    var oreuse = parse_uint(getenv("GLINT_ORACLE_REUSE", "0"), "GLINT_ORACLE_REUSE")
+    var nflag = (LAYERS * 4 + 4) * INTER
+    var ovl_flags = ctx.enqueue_create_buffer[DType.int32](nflag)
+    var ovl_zero = ctx.enqueue_create_host_buffer[DType.int32](nflag)
+    for i in range(nflag):
         ovl_zero[i] = 0
     ctx.enqueue_copy(dst_buf=ovl_flags, src_buf=ovl_zero)
     var idx_b = ctx.enqueue_create_buffer[DType.int32](8192)
     var cnt_b = ctx.enqueue_create_buffer[DType.int32](1)
+    var idx_all = ctx.enqueue_create_buffer[DType.int32](LAYERS * 4 * 8192 if oracle else 8)
+    var cnt_all = ctx.enqueue_create_buffer[DType.int32](LAYERS * 4 if oracle else 8)
+    var ostg_total = 0
+    var ostg_off = List[Int]()
+    for i in range(LAYERS * 4):
+        ostg_off.append(ostg_total)
+        if oracle:
+            ostg_total += kin[i % 4] * nout[i % 4] // 2
+    var ostg_all = ctx.enqueue_create_buffer[DType.uint8](ostg_total + 16)
+    var idxL = List[DeviceBuffer[DType.int32]]()
+    var cntL = List[DeviceBuffer[DType.int32]]()
+    var ostg8 = List[DeviceBuffer[DType.uint8]]()
+    var ostg32 = List[DeviceBuffer[DType.uint32]]()
+    for i in range(LAYERS * 4):
+        if oracle:
+            idxL.append(DeviceBuffer[DType.int32](ctx, idx_all.unsafe_ptr().unsafe_offset(i * 8192), 8192, owning=False))
+            cntL.append(DeviceBuffer[DType.int32](ctx, cnt_all.unsafe_ptr().unsafe_offset(i), 1, owning=False))
+            var sz = kin[i % 4] * nout[i % 4] // 2
+            ostg8.append(DeviceBuffer[DType.uint8](ctx, ostg_all.unsafe_ptr().unsafe_offset(ostg_off[i]), sz, owning=False))
+            ostg32.append(DeviceBuffer[DType.uint32](ctx, ostg_all.unsafe_ptr().unsafe_offset(ostg_off[i]).unsafe_bitcast[UInt32](), sz // 4, owning=False))
+        else:
+            idxL.append(DeviceBuffer[DType.int32](ctx, idx_b.unsafe_ptr(), 8192, owning=False))
+            cntL.append(DeviceBuffer[DType.int32](ctx, cnt_b.unsafe_ptr(), 1, owning=False))
     var dummy_log = ctx.enqueue_create_buffer[DType.int32](4)
     var part_buf = ctx.enqueue_create_buffer[DType.float32](KS * 16384)
     var part_g = ctx.enqueue_create_buffer[DType.float32](32 * 16384)
@@ -520,6 +551,7 @@ def main() raises:
         gen.append(0)
     var t1h = ctx.enqueue_create_host_buffer[DType.int32](1)
     var enq_ns = 0
+    var orc_ns = 0
     for pos in range(steps):
         var stamp_base = (pos + 1) * LAYERS
         # Free-running rollout (Amendment 3 protocol): 12 prompts of 64 evaluation-text tokens at offsets 0,128,...,1408, then 32 greedy
@@ -573,16 +605,16 @@ def main() raises:
                 if nc[i] > 0:
                     ks.record_event(ev_in2[i])
                     gs.enqueue_wait_for(ev_in2[i])
-                    gs.enqueue_function(k_sel, xin16_c[c], idx_b, cnt_b, dummy_log, Int32(0), Int32(kd), Int32(nc[i]), Int32(0), Int32(0), grid_dim=1, block_dim=1024)
+                    gs.enqueue_function(k_sel, xin16_c[c], idxL[i], cntL[i], dummy_log, Int32(0), Int32(kd), Int32(nc[i]), Int32(0), Int32(0), grid_dim=1, block_dim=1024)
                     if abl_t != 1 and abl_t != 5:
-                        gs.enqueue_function(k_gatx, plugk_w[i], idx_b, cnt_b, stg32[c], ovl_flags, Int32(n // 8), Int32(c * INTER), Int32((stamp_base + lr) * 2 + 1000), Int32(0), grid_dim=gbk[c], block_dim=128)
+                        gs.enqueue_function(k_gatx, plugk_w[i], idxL[i], cntL[i], stg32[c], ovl_flags, Int32(n // 8), Int32(c * INTER), Int32((stamp_base + lr) * 2 + 1000), Int32(0), grid_dim=gbk[c], block_dim=128)
                     gs.record_event(ev_cd[i])
                 ks.enqueue_function(k_gkm, hk32[i], sk_v[i], t0b, xin_c[c], part_g, Int32(n), Int32(kd), Int32(splits_c[c]), grid_dim=(ceildiv(n // 8, GTB), splits_c[c]), block_dim=GTB)
                 ks.enqueue_function(k_gkc, part_g, yout_c[c], Int32(n), Int32(splits_c[c]), grid_dim=ceildiv(n, 128), block_dim=128)
                 if nc[i] > 0:
                     ks.enqueue_wait_for(ev_cd[i])
                     if abl_t != 4 and abl_t != 5:
-                        ks.enqueue_function(k_corrksc, hk_v[i], sk_v[i], dltb, xin_c[c], idx_b, stg8[c], cnt_b, part_buf, Int32(n), Int32(kd), grid_dim=(ceildiv(n, 128), KS), block_dim=128)
+                        ks.enqueue_function(k_corrksc, hk_v[i], sk_v[i], dltb, xin_c[c], idxL[i], stg8[c], cntL[i], part_buf, Int32(n), Int32(kd), grid_dim=(ceildiv(n, 128), KS), block_dim=128)
                         ks.enqueue_function(k_comb, part_buf, yout_c[c], Int32(n), grid_dim=ceildiv(n, 128), block_dim=128)
             ks.enqueue_function(k_res, down, x, grid_dim=ceildiv(H, 256), block_dim=256)
         ks.enqueue_function(k_normf, x, fnorm, hbf, grid_dim=1, block_dim=256)
@@ -597,6 +629,51 @@ def main() raises:
         enq_ns += Int(perf_counter_ns() - t_tok0)
         ks.synchronize()
         ctx.synchronize()
+        if oracle:
+            gs.synchronize()
+            var tb0 = perf_counter_ns()
+            var ost = Int32(4000000 + pos * 2)
+            ctx.enqueue_function(k_embed, emb, tokd, x, grid_dim=ceildiv(H, 256), block_dim=256)
+            ctx.stream().record_event(emb_done)
+            ks.enqueue_wait_for(emb_done)
+            gs.enqueue_wait_for(emb_done)
+            for i in range(LAYERS * 4):
+                if nc[i] > 0:
+                    gs.enqueue_function(k_gatx, plugk_w[i], idxL[i], cntL[i], ostg32[i], ovl_flags, Int32(nout[i % 4] // 8), Int32((i + 4) * INTER), ost, Int32(2 * oreuse), grid_dim=gbk[i % 4], block_dim=128)
+                    gs.record_event(ev_cd[i])
+            for lr in range(LAYERS):
+                for c in range(4):
+                    var i = lr * 4 + c
+                    var n = nout[c]
+                    var kd = kin[c]
+                    if c == 0:
+                        ks.enqueue_function(k_normf, x, innorm_v[lr], hbf, grid_dim=1, block_dim=256)
+                    elif c == 1:
+                        ks.enqueue_function(k_rope, qkv, cv, sv, rp, grid_dim=ceildiv(QKV, 256), block_dim=256)
+                        ks.enqueue_function(k_kv, rp, kv_k[lr], kv_v[lr], Int32(q), grid_dim=ceildiv(NKV * HD, 256), block_dim=256)
+                        ks.enqueue_function(k_attp, rp, kv_k[lr], kv_v[lr], att_pm, att_pd, att_pa, Int32(q), grid_dim=(NCH, NQ), block_dim=128)
+                        ks.enqueue_function(k_attc, att_pm, att_pd, att_pa, attn, attnb, grid_dim=NQ, block_dim=HD)
+                    elif c == 2:
+                        ks.enqueue_function(k_res, proj, x, grid_dim=ceildiv(H, 256), block_dim=256)
+                        ks.enqueue_function(k_normf, x, postnorm_v[lr], hbf, grid_dim=1, block_dim=256)
+                    else:
+                        ks.enqueue_function(k_swi, gu, act, actb, grid_dim=ceildiv(INTER, 256), block_dim=256)
+                    ks.enqueue_function(k_gkm, hk32[i], sk_v[i], t0b, xin_c[c], part_g, Int32(n), Int32(kd), Int32(splits_c[c]), grid_dim=(ceildiv(n // 8, GTB), splits_c[c]), block_dim=GTB)
+                    ks.enqueue_function(k_gkc, part_g, yout_c[c], Int32(n), Int32(splits_c[c]), grid_dim=ceildiv(n, 128), block_dim=128)
+                    if nc[i] > 0:
+                        ks.enqueue_wait_for(ev_cd[i])
+                        ks.enqueue_function(k_corrksc, hk_v[i], sk_v[i], dltb, xin_c[c], idxL[i], ostg8[i], cntL[i], part_buf, Int32(n), Int32(kd), grid_dim=(ceildiv(n, 128), KS), block_dim=128)
+                        ks.enqueue_function(k_comb, part_buf, yout_c[c], Int32(n), grid_dim=ceildiv(n, 128), block_dim=128)
+                ks.enqueue_function(k_res, down, x, grid_dim=ceildiv(H, 256), block_dim=256)
+            ks.enqueue_function(k_normf, x, fnorm, hbf, grid_dim=1, block_dim=256)
+            ks.enqueue_function(k_lgf, hbf, emb, lg, grid_dim=ceildiv(V, 4), block_dim=128)
+            ks.enqueue_function(k_cef, lg, tv, lv, t1v, Int32(1), grid_dim=1, block_dim=256)
+            if mrg_on:
+                ks.enqueue_function(k_mrg, lg, t1v, mv, grid_dim=1, block_dim=256)
+            ks.synchronize()
+            gs.synchronize()
+            ctx.synchronize()
+            orc_ns += Int(perf_counter_ns() - tb0)
         if mrg_on and (not roll or q >= 63):
             ctx.enqueue_copy(dst_buf=m1h, src_buf=mv)
             ctx.synchronize()
@@ -645,6 +722,8 @@ def main() raises:
     print("MOJO_GLINT_SELECT_DECODE steps", steps, "duration_s", elapsed, "ms_per_token", elapsed * 1000 / Float64(steps), "tokens_per_s", Float64(steps) / elapsed)
     print("MOJO_GLINT_SELECT_DECODE ppl", exp(total_ce / Float64(steps)), "oracle_top1", matches, "/", steps)
     print("MOJO_ENQ host_enqueue_ms_per_token", Float64(enq_ns) / 1e6 / Float64(steps))
+    if oracle:
+        print("MOJO_ORACLE pass_b_ms_per_token", Float64(orc_ns) / 1e6 / Float64(steps), "plug_slots_MB", Float64(ostg_total) / 1e6, "reuse_tokens", oreuse)
     print("MOJO_GLINT_SELECT_DECODE_DONE")
     # Keep all owning buffers alive while their typed borrowed views are used.
     _ = emb_u8.unsafe_ptr()
@@ -653,6 +732,9 @@ def main() raises:
     _ = kvv.unsafe_ptr()
     _ = table_u8.unsafe_ptr()
     _ = stg_all.unsafe_ptr()
+    _ = ostg_all.unsafe_ptr()
+    _ = idx_all.unsafe_ptr()
+    _ = cnt_all.unsafe_ptr()
     _ = part_g.unsafe_ptr()
     _ = hbf.unsafe_ptr()
     _ = attnb.unsafe_ptr()
