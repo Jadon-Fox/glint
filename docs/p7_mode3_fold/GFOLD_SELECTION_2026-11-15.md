@@ -909,3 +909,28 @@ b-bit speed.
   carry over to landing, because the extra channels are the ones that matter least.
 - Untested and consistent with this: two levels at once (4 bits for the top channels, 2 bits for the next tier), which
   is the interior-level G-fold structure. It needs a two-tier selection and cannot be emulated with one table.
+
+### Two-tier plug: full plug on the top channels, prefix on the next tier (2026-11-18)
+
+`GLINT_TIER2_PCT=p2` with `GLINT_PLUG_BITS=b` in the lean decoder (build `/tmp/p7_lean8`, identity passed): the top
+`percent` channels of each linear get the full 4-bit correction and the next channels up to p2 the b-bit prefix. Applied
+as corr(prefix table, top p2) + corr(full minus prefix, top percent), exact because the correction is linear in channels
+and the top set lies inside the wider set. Bytes are those of a real two-tier layout (top rows at 4 bits, tier-2 rows at
+b bits). Forced context, scored from stored margins. Data `prims_20261118/plug_tiers/`.
+
+| split | plug MB per token | decided A / B | tie flips A / B |
+|---|---|---|---|
+| 15% + next 12% at 2 bits | 338 | 0 / 0 | 13 / 12 |
+| 12% + next 22% at 2 bits | 371 | 0 / 0 | 7 / 14 |
+| 15% + next 16% at 2 bits | 371 | 0 / 0 | 14 / 15 |
+| 18% + next 10% at 2 bits | 371 | 0 / 0 | 11 / 12 |
+| 20% + next 6% at 2 bits | 371 | 1 / 0 | 12 / 10 |
+| 15% + next 11% at 3 bits | 375 | 1 / 0 | 11 / 13 |
+| full plug 23% (reference) | 370 | 0 / 0 | 16 / 13 |
+
+- **The two-tier plug lands at fewer bytes than any single-level plug:** 338 MB (15% + 12% at 2 bits), 9% below full plug
+  at 23% and 16% below the 25% used before. Partial levels pay as an interior level under a full burn, not instead of it
+  (the operator's "quarter burn" with the full burn calibrating the on-off point).
+- Speed is not measured here: the emulation moves full rows for both tiers. A real two-tier layout (a separate plane
+  holding the top 2 bits of each row) is needed for the byte saving to reach the link.
+- Lower splits are being searched next.

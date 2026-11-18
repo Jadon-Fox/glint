@@ -400,7 +400,40 @@ def main() raises:
     # cells sharing the plug's top b bits, so the low 4-b plug bits change nothing. Same bytes move (speed unchanged);
     # outputs are those of a b-bit prefix plug on the current (ordered) table.
     var pbits = parse_uint(getenv("GLINT_PLUG_BITS", "4"), "GLINT_PLUG_BITS")
-    if pbits < 4:
+    # GLINT_TIER2_PCT = p2 (> percent): two plug levels at once. The top `percent` channels get the full plug and the next
+    # channels up to p2 get the GLINT_PLUG_BITS-bit prefix. Applied as corr(prefix table, top p2) + corr(full - prefix, top
+    # percent), which is exact because the correction is linear in channels and the top set is inside the wider set.
+    var tier2 = parse_uint(getenv("GLINT_TIER2_PCT", "0"), "GLINT_TIER2_PCT")
+    var t0x = ctx.enqueue_create_buffer[DType.float32](256)
+    var dltb2 = ctx.enqueue_create_buffer[DType.float32](256)
+    var dltbd = ctx.enqueue_create_buffer[DType.float32](256)
+    if tier2 > 0:
+        if pbits >= 4:
+            raise Error("GLINT_TIER2_PCT needs GLINT_PLUG_BITS < 4")
+        var c4 = ctx.enqueue_create_host_buffer[DType.float32](256)
+        var c2 = ctx.enqueue_create_host_buffer[DType.float32](256)
+        var cd = ctx.enqueue_create_host_buffer[DType.float32](256)
+        ctx.enqueue_copy(dst_buf=c4, src_buf=table)
+        ctx.synchronize()
+        var g2 = 1 << (4 - pbits)
+        for hh in range(16):
+            for q0 in range(0, 16, g2):
+                var acc2 = Float32(0)
+                for r in range(g2):
+                    acc2 += c4[hh * 16 + q0 + r]
+                for r in range(g2):
+                    c2[hh * 16 + q0 + r] = acc2 / Float32(g2)
+        for i2 in range(256):
+            cd[i2] = c4[i2] - c2[i2] + parent_h[i2 // 16]
+        var c2d = ctx.enqueue_create_buffer[DType.float32](256)
+        var cdd = ctx.enqueue_create_buffer[DType.float32](256)
+        ctx.enqueue_copy(dst_buf=c2d, src_buf=c2)
+        ctx.enqueue_copy(dst_buf=cdd, src_buf=cd)
+        ctx.enqueue_function(k_mk, c2d, parent_b, t0x, dltb2, grid_dim=1, block_dim=256)
+        ctx.enqueue_function(k_mk, cdd, parent_b, t0x, dltbd, grid_dim=1, block_dim=256)
+        ctx.synchronize()
+        print("MOJO_GLINT_TIER2 pct", tier2, "tier2_bits", pbits)
+    if pbits < 4 and tier2 == 0:
         var thh = ctx.enqueue_create_host_buffer[DType.float32](256)
         ctx.enqueue_copy(dst_buf=thh, src_buf=table)
         ctx.synchronize()
@@ -565,6 +598,18 @@ def main() raises:
             if cls_pct[c] >= 0:
                 share = cls_pct[c]
             nc.append((share * kin[c] + 99) // 100)
+    var nc2 = List[Int]()
+    for l in range(LAYERS):
+        for c in range(4):
+            nc2.append((tier2 * kin[c] + 99) // 100 if tier2 > 0 else 0)
+    var idx_t2 = ctx.enqueue_create_buffer[DType.int32](8192)
+    var cnt_t2 = ctx.enqueue_create_buffer[DType.int32](1)
+    if tier2 > 0:
+        var tb = 0
+        for l in range(LAYERS):
+            for c in range(4):
+                tb += nc[l * 4 + c] * nout[c] // 2 + (nc2[l * 4 + c] - nc[l * 4 + c]) * nout[c] // 2 * pbits // 4
+        print("MOJO_GLINT_TIER2 real_layout_plug_bytes_per_token", tb)
     if len(lay_pct) > 0:
         var lb = 0
         for l in range(LAYERS):
@@ -651,8 +696,13 @@ def main() raises:
                 if nc[i] > 0:
                     ks.record_event(ev_in2[i])
                     gs.enqueue_wait_for(ev_in2[i])
+                    if tier2 > 0:
+                        gs.enqueue_function(k_sel, xin16_c[c], idx_t2, cnt_t2, dummy_log, Int32(0), Int32(kd), Int32(nc2[i]), Int32(0), Int32(0), grid_dim=1, block_dim=1024)
+                        gs.enqueue_function(k_gatx, plugk_w[i], idx_t2, cnt_t2, stg32[c], ovl_flags, Int32(n // 8), Int32(c * INTER), Int32((stamp_base + lr) * 2 + 1000), Int32(0), grid_dim=gbk[c], block_dim=128)
                     gs.enqueue_function(k_sel, xin16_c[c], idxL[i], cntL[i], dummy_log, Int32(0), Int32(kd), Int32(nc[i]), Int32(0), Int32(0), grid_dim=1, block_dim=1024)
-                    if abl_t != 1 and abl_t != 5:
+                    if tier2 > 0:
+                        pass
+                    elif abl_t != 1 and abl_t != 5:
                         if reuse > 0:
                             gs.enqueue_function(k_gatx, plugk_w[i], idxL[i], cntL[i], ostg32[i], ovl_flags, Int32(n // 8), Int32((i + 4) * INTER), Int32(2000 + pos * 2), Int32(2 * reuse), grid_dim=gbk[c], block_dim=128)
                         else:
@@ -663,8 +713,14 @@ def main() raises:
                 if nc[i] > 0:
                     ks.enqueue_wait_for(ev_cd[i])
                     if abl_t != 4 and abl_t != 5:
-                        ks.enqueue_function(k_corrksc, hk_v[i], sk_v[i], dltb, xin_c[c], idxL[i], ostg8[i] if reuse > 0 else stg8[c], cntL[i], part_buf, Int32(n), Int32(kd), grid_dim=(ceildiv(n, 128), KS), block_dim=128)
-                        ks.enqueue_function(k_comb, part_buf, yout_c[c], Int32(n), grid_dim=ceildiv(n, 128), block_dim=128)
+                        if tier2 > 0:
+                            ks.enqueue_function(k_corrksc, hk_v[i], sk_v[i], dltb2, xin_c[c], idx_t2, stg8[c], cnt_t2, part_buf, Int32(n), Int32(kd), grid_dim=(ceildiv(n, 128), KS), block_dim=128)
+                            ks.enqueue_function(k_comb, part_buf, yout_c[c], Int32(n), grid_dim=ceildiv(n, 128), block_dim=128)
+                            ks.enqueue_function(k_corrksc, hk_v[i], sk_v[i], dltbd, xin_c[c], idxL[i], stg8[c], cntL[i], part_buf, Int32(n), Int32(kd), grid_dim=(ceildiv(n, 128), KS), block_dim=128)
+                            ks.enqueue_function(k_comb, part_buf, yout_c[c], Int32(n), grid_dim=ceildiv(n, 128), block_dim=128)
+                        else:
+                            ks.enqueue_function(k_corrksc, hk_v[i], sk_v[i], dltb, xin_c[c], idxL[i], ostg8[i] if reuse > 0 else stg8[c], cntL[i], part_buf, Int32(n), Int32(kd), grid_dim=(ceildiv(n, 128), KS), block_dim=128)
+                            ks.enqueue_function(k_comb, part_buf, yout_c[c], Int32(n), grid_dim=ceildiv(n, 128), block_dim=128)
             ks.enqueue_function(k_res, down, x, grid_dim=ceildiv(H, 256), block_dim=256)
         ks.enqueue_function(k_normf, x, fnorm, hbf, grid_dim=1, block_dim=256)
         ks.enqueue_function(k_lgf, hbf, emb, lg, grid_dim=ceildiv(V, 4), block_dim=128)
