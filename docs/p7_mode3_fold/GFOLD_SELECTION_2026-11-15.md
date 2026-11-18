@@ -863,3 +863,25 @@ Uniform shares, same method (data `layer_min3/`):
 - The VRAM side of the plug is already small on the transient path: one channel-addressed slot per class (50 MB), and only
   the selected rows of one linear are in use at a time (largest: gate+up at 23%, about 5.8 MB). The 362 to 370 MB is link
   traffic per token, not resident VRAM.
+
+## Partial plug: how much of the correction the top bits carry (2026-11-18)
+
+Operator idea (2026-11-18, "quarter burn": burn points at any level, with the opposite dimension calibrating the on-off
+point). `scripts/glint_plug_prefix_offline.py`, layers 0, 8, 16, 24, 31, all four linears, against the BF16 source. The
+pin's cell table is ordered by child index in every hole row, so a b-bit prefix of the plug selects a contiguous range of
+cells; "table" uses the mean of that range, "fit" the data-weighted mean (what a table built for prefixes could reach).
+Data `prims_20261118/prefix/prefix_rms.tsv`.
+
+| plug bits | bytes per row | share of the fold-to-full weight error removed (table / fit) |
+|---|---|---|
+| 1 | 1/4 | 50.7% / 53.3% |
+| 2 | 1/2 | 78.2% / 80.1% |
+| 3 | 3/4 | 92.6% / 93.9% |
+| 4 | 1 | 100% / 100.8% |
+
+- Each bit roughly halves the remaining error, uniformly across layers and classes. Returns per byte are concave: 2 bits
+  carry 78% of the correction for half the bytes. That is the condition under which intermediate levels pay.
+- The current table already works as a nested code (table within 2 points of fit), so no new table is needed to test it.
+- Landing test (pre-registered): `GLINT_PLUG_BITS=b` coarsens the table so the low 4-b bits change nothing (same bytes
+  move; landing only). Rule: a b-bit arm is better than 4-bit 23% if it has 0 decided flips on both sets at a byte budget
+  (share x b/4) below 23%. Arms: 2 bits at 23 / 34 / 46 / 60%, 3 bits at 31%, 1 bit at 46%.

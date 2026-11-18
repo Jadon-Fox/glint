@@ -396,6 +396,25 @@ def main() raises:
     ctx.enqueue_copy(dst_buf=parent_b, src_buf=parent_h)
     var t0b = ctx.enqueue_create_buffer[DType.float32](256)
     var dltb = ctx.enqueue_create_buffer[DType.float32](256)
+    # GLINT_PLUG_BITS = b < 4 (landing emulation of a partial plug): each cell of a hole row is replaced by the mean of the
+    # cells sharing the plug's top b bits, so the low 4-b plug bits change nothing. Same bytes move (speed unchanged);
+    # outputs are those of a b-bit prefix plug on the current (ordered) table.
+    var pbits = parse_uint(getenv("GLINT_PLUG_BITS", "4"), "GLINT_PLUG_BITS")
+    if pbits < 4:
+        var thh = ctx.enqueue_create_host_buffer[DType.float32](256)
+        ctx.enqueue_copy(dst_buf=thh, src_buf=table)
+        ctx.synchronize()
+        var g = 1 << (4 - pbits)
+        for hh in range(16):
+            for q0 in range(0, 16, g):
+                var acc = Float32(0)
+                for r in range(g):
+                    acc += thh[hh * 16 + q0 + r]
+                for r in range(g):
+                    thh[hh * 16 + q0 + r] = acc / Float32(g)
+        ctx.enqueue_copy(dst_buf=table, src_buf=thh)
+        ctx.synchronize()
+        print("MOJO_GLINT_PLUG_BITS", pbits)
     ctx.enqueue_function(k_mk, table, parent_b, t0b, dltb, grid_dim=1, block_dim=256)
     ctx.synchronize()
 
