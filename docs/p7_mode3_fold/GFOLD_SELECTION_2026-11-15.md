@@ -827,3 +827,21 @@ from stored reference margins. One 8-layer band lowered at a time, every other l
 - At the margin the later layers need the larger share. The burn sweep's "layers 0-7 matter most" measured a different
   thing (full plug in one window, every other layer at 0) and does not carry over to small changes around 25%.
 - Each band at 15% saves 40 MB per token (10% of the 402 MB at uniform 25%). Combined profiles follow.
+
+Combined profiles (layers 0-7 / 8-15 / 16-23 / 24-31), same method:
+
+| profile | plug MB per token | decided A / B |
+|---|---|---|
+| 25 / 25 / 25 / 25 | 403 | 0 / 0 |
+| 15 / 15 / 25 / 25 | 322 | 1 / 4 |
+| 10 / 10 / 30 / 30 | 322 | 4 / 2 |
+| 10 / 15 / 25 / 25 | 302 | 3 / 2 |
+| 15 / 15 / 20 / 25 | 302 | 1 / 3 |
+| 15 / 15 / 25 / 30 | 342 | 2 / 3 |
+
+- Bands that land alone at 15% fail together. The residual each layer leaves accumulates through depth into one landing
+  budget per token, so the minimum is not a per-layer floor that can be summed: it is a total, shared across layers.
+  This is the G-fold structure (one constraint, a shared price), measured: cutting one band uses most of the slack.
+- Moving bytes from early to late layers does not buy the slack back (10/10/30/30 and 15/15/25/30 fail).
+- So far the smallest landing operating point is one band at 15% with the rest at 25%: 362 MB per token, 10% below
+  uniform 25%. The smallest uniform share that lands is being pinned next (21 to 23%).
