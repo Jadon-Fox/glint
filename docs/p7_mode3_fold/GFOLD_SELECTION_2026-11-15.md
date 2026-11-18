@@ -885,3 +885,27 @@ Data `prims_20261118/prefix/prefix_rms.tsv`.
 - Landing test (pre-registered): `GLINT_PLUG_BITS=b` coarsens the table so the low 4-b bits change nothing (same bytes
   move; landing only). Rule: a b-bit arm is better than 4-bit 23% if it has 0 decided flips on both sets at a byte budget
   (share x b/4) below 23%. Arms: 2 bits at 23 / 34 / 46 / 60%, 3 bits at 31%, 1 bit at 46%.
+
+### Partial-plug landing results (2026-11-18): null
+
+Data `prims_20261118/plug_bits/`. Build `/tmp/p7_lean7`, identity passed. Forced context, scored from stored margins.
+Bytes are those a real b-bit layout would move (share x b/4); the emulation moves full rows, so its ms/token is not the
+b-bit speed.
+
+| arm | bytes (4-bit-share terms) | decided A / B |
+|---|---|---|
+| 4 bits, 23% (reference) | 23% | 0 / 0 |
+| 2 bits, 23% | 11.5% | 5 / 3 |
+| 2 bits, 34% | 17% | 3 / 2 |
+| 2 bits, 46% | 23% | 3 / 2 |
+| 2 bits, 60% | 30% | 3 / 1 |
+| 3 bits, 31% | 23% | 1 / 0 |
+| 1 bit, 46% | 11.5% | 10 / 11 |
+
+- **Null by the pre-registered rule.** No partial plug lands at fewer bytes than 4 bits at 23%. 2 bits fail even at 60%
+  of channels (30% bytes); 3 bits at the same bytes come within one decided flip.
+- Reading: the decided flips are driven by the leftover error in the channels that matter most (largest |x|). A 2-bit plug
+  leaves 22% of their correction undone however many extra channels it covers. Concave returns in weight space did not
+  carry over to landing, because the extra channels are the ones that matter least.
+- Untested and consistent with this: two levels at once (4 bits for the top channels, 2 bits for the next tier), which
+  is the interior-level G-fold structure. It needs a two-tier selection and cannot be emulated with one table.
