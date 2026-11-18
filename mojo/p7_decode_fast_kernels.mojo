@@ -107,3 +107,30 @@ def ce_argmax_block[
         var t = Int(tgt[unsafe_offset=0])
         loss[unsafe_offset=0] = log(rmx[unsafe_offset=0]) + gmx - bf16r(lg[unsafe_offset=t])
         top1[unsafe_offset=0] = gmi
+
+
+# Confidence of the chosen token: bf16 logit of top1 minus the largest other bf16 logit. Read-only diagnostic and the trigger
+# for margin escalation (GLINT_ESC_M100). One block of 256 threads. Launch: grid_dim=1, block_dim=256.
+def margin_block[
+    lo: ImmOrigin, io: ImmOrigin, mo: MutOrigin
+](lg: ImmPointer[Float32, lo], top1: ImmPointer[Int32, io], gap: MutPointer[Float32, mo]):
+    var tid = thread_idx.x
+    var rmx = stack_allocation[256, Float32, address_space=AddressSpace.SHARED]()
+    var t = Int(top1[unsafe_offset=0])
+    var mx = Float32(-1e30)
+    for v in range(tid, V, 256):
+        if v != t:
+            var x = bf16r(lg[unsafe_offset=v])
+            if x > mx:
+                mx = x
+    rmx[unsafe_offset=tid] = mx
+    barrier()
+    comptime for step in range(8):
+        comptime off = 128 >> step
+        if tid < off:
+            var bx = rmx[unsafe_offset=tid + off]
+            if bx > rmx[unsafe_offset=tid]:
+                rmx[unsafe_offset=tid] = bx
+        barrier()
+    if tid == 0:
+        gap[unsafe_offset=0] = bf16r(lg[unsafe_offset=t]) - rmx[unsafe_offset=0]

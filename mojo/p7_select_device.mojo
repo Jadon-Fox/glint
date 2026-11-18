@@ -5,7 +5,7 @@
 # Indices are written in ascending channel order (the correction sums in that order, so results match the host path exactly).
 # The count stays on the device (cnt) and is also logged per linear (cnt_log) for byte accounting.
 # select_topk: grid_dim=1, block_dim=1024, K <= 8192.  gather_rows_d: grid_dim=K, block_dim=128.
-from std.gpu import thread_idx, block_idx, global_idx
+from std.gpu import thread_idx, block_idx, global_idx, grid_dim
 from std.memory import stack_allocation
 from max.gpu.sync import barrier
 from max.gpu.memory import AddressSpace
@@ -19,7 +19,7 @@ def select_topk[
     idx: MutPointer[Int32, io],
     cnt: MutPointer[Int32, co],
     cnt_log: MutPointer[Int32, lo],
-    slot: Int32, kdim: Int32, nsel: Int32,
+    slot: Int32, kdim: Int32, nsel: Int32, tkey: Int32, nfloor: Int32,
 ):
     var tid = Int(thread_idx.x)
     var kk = Int(kdim)
@@ -47,6 +47,85 @@ def select_topk[
         barrier()
         if total >= Int(nsel):
             thr = cand
+    # Price mode (G-fold selection, GFOLD_SELECTION_2026-11-15.md): tkey > 0 is a fixed |x| key threshold for this linear. nsel then
+    # acts only as the cap that bounds the staging buffers: the kept set is every channel with key >= max(rank threshold, tkey).
+    var thr_cap = thr
+    if Int(tkey) > thr:
+        thr = Int(tkey)
+    # Relational price (H-G2r): tkey < 0 means tau = -tkey / 1024, and the threshold is tau * mean|x| of THIS input vector.
+    if Int(tkey) < 0:
+        var redf = stack_allocation[SB, Float32, address_space=AddressSpace.SHARED]()
+        var acc = Float32(0)
+        for i in range(lo_i, hi_i):
+            var k = Int(x[unsafe_offset=i]) & 32767
+            var ex = k >> 7
+            if ex > 0:
+                var f = Float32(128 + (k & 127))
+                var n = ex - 134
+                if n > 40:
+                    n = 40
+                if n < -60:
+                    n = -60
+                while n > 0:
+                    f = f * 2.0
+                    n -= 1
+                while n < 0:
+                    f = f * 0.5
+                    n += 1
+                acc += f
+        redf[unsafe_offset=tid] = acc
+        barrier()
+        comptime for step in range(10):
+            comptime off = 512 >> step
+            if tid < off:
+                redf[unsafe_offset=tid] = redf[unsafe_offset=tid] + redf[unsafe_offset=tid + off]
+            barrier()
+        var t = redf[unsafe_offset=0] / Float32(kk) * Float32(-Int(tkey)) / 1024.0
+        barrier()
+        var rk = 1
+        if t > 0.0:
+            var e2 = 0
+            while t >= 2.0 and e2 < 100:
+                t = t * 0.5
+                e2 += 1
+            while t < 1.0 and e2 > -120:
+                t = t * 2.0
+                e2 -= 1
+            rk = ((e2 + 127) << 7) | Int((t - 1.0) * 128.0)
+            if rk < 1:
+                rk = 1
+            if rk > 32767:
+                rk = 32767
+        if rk > thr:
+            thr = rk
+    # Floor (2026-11-16): with a price threshold active, every linear still keeps at least its nfloor largest channels, i.e. the
+    # kept set is {key >= max(cap threshold, min(price threshold, floor-rank threshold))}.
+    if Int(nfloor) > 0 and Int(tkey) != 0:
+        var thf = 0
+        for bi in range(15):
+            var cand = thf | (1 << (14 - bi))
+            var c = 0
+            for i in range(lo_i, hi_i):
+                if (Int(x[unsafe_offset=i]) & 32767) >= cand:
+                    c += 1
+            red[unsafe_offset=tid] = Int32(c)
+            barrier()
+            comptime for step in range(10):
+                comptime off = 512 >> step
+                if tid < off:
+                    red[unsafe_offset=tid] = red[unsafe_offset=tid] + red[unsafe_offset=tid + off]
+                barrier()
+            var total = Int(red[unsafe_offset=0])
+            barrier()
+            if total >= Int(nfloor):
+                thf = cand
+        if thf < thr:
+            thr = thf
+        if thr < thr_cap:
+            thr = thr_cap
+    # nsel = 0 selects nothing (coast on the fold alone); without this the bisection keeps the largest key.
+    if Int(nsel) == 0:
+        thr = 32768
     var mine = 0
     for i in range(lo_i, hi_i):
         if (Int(x[unsafe_offset=i]) & 32767) >= thr:
@@ -287,16 +366,16 @@ def overlap_probe[
 # buffer; the flag only emulates a one-token-lookback cache. Persistent grid of GB blocks, same as gather_rows_p4.
 def gather_rows_fix[
     po: ImmOrigin, io: ImmOrigin, co: ImmOrigin, so: MutOrigin, fo: MutOrigin
-](plugk: ImmPointer[UInt32, po], idx: ImmPointer[Int32, io], cnt: ImmPointer[Int32, co], stage: MutPointer[UInt32, so], flags: MutPointer[Int32, fo], rowwords: Int32, off: Int32, stamp: Int32):
+](plugk: ImmPointer[UInt32, po], idx: ImmPointer[Int32, io], cnt: ImmPointer[Int32, co], stage: MutPointer[UInt32, so], flags: MutPointer[Int32, fo], rowwords: Int32, off: Int32, stamp: Int32, win: Int32):
     var rw = Int(rowwords)
     var n = Int(cnt[unsafe_offset=0])
     var tid = Int(thread_idx.x)
     var need = stack_allocation[1, Int32, address_space=AddressSpace.SHARED]()
-    for i in range(Int(block_idx.x), n, GB):
+    for i in range(Int(block_idx.x), n, Int(grid_dim.x)):
         var c = Int(idx[unsafe_offset=i])
         if tid == 0:
             var f = flags[unsafe_offset=Int(off) + c]
-            if f < stamp:
+            if f < stamp - win:
                 need[unsafe_offset=0] = 1
             else:
                 need[unsafe_offset=0] = 0
@@ -343,6 +422,51 @@ def apply_corr_ksc[
         var p = Int((pb >> UInt8(4 * (r & 1))) & UInt8(15))
         acc += (delta[unsafe_offset=h * 16 + p] * scales_k[unsafe_offset=(c >> 6) * nn + r]) * x[unsafe_offset=c].cast[DType.float32]()
     part[unsafe_offset=s * nn + r] = acc
+
+# Ephemeral plug correction (operator, 2026-11-15): apply_corr_ksc with the plug rows read straight from pinned HOST memory.
+# The plain kernel reads one byte per thread, which over the link is one tiny transfer per byte. Here four threads per block
+# each pull one aligned 16-byte vector (32 output rows) into shared memory, then all 128 threads compute from it, so host
+# reads are the same 16-byte pieces the gather kernel uses. Nothing of the plug is written to device memory beyond the block's
+# 64-byte scratch. block_dim must be 128 and n a multiple of 128. Same arithmetic and summation order as apply_corr_ksc.
+def apply_corr_kse[
+    ho: ImmOrigin, so: ImmOrigin, dt: ImmOrigin, xo: ImmOrigin, io: ImmOrigin, go: ImmOrigin, co: ImmOrigin, po: MutOrigin
+](
+    hole_k: ImmPointer[UInt8, ho],
+    scales_k: ImmPointer[Float32, so],
+    delta: ImmPointer[Float32, dt],
+    x: ImmPointer[BFloat16, xo],
+    idx: ImmPointer[Int32, io],
+    plug_host: ImmPointer[UInt8, go],
+    cnt: ImmPointer[Int32, co],
+    part: MutPointer[Float32, po],
+    n: Int32, kdim: Int32,
+):
+    var r = global_idx.x
+    var tid = Int(thread_idx.x)
+    var s = Int(block_idx.y)
+    var nn = Int(n)
+    var half = nn // 2
+    var cn = Int(cnt[unsafe_offset=0])
+    var chunk = (cn + KS - 1) // KS
+    var lo = s * chunk
+    var hi = lo + chunk
+    if hi > cn:
+        hi = cn
+    var sh = stack_allocation[64, UInt8, address_space=AddressSpace.SHARED]()
+    var acc = Float32(0)
+    for i in range(lo, hi):
+        var c = Int(idx[unsafe_offset=i])
+        if (tid & 31) == 0 and r < nn:
+            var v = plug_host.unsafe_offset(c * half + (r >> 1)).load[width=16, alignment=16]()
+            sh.unsafe_offset(tid >> 1).store[alignment=1](v)
+        barrier()
+        if r < nn:
+            var h = Int((hole_k[unsafe_offset=c * half + (r >> 1)] >> UInt8(4 * (r & 1))) & UInt8(15))
+            var p = Int((sh[unsafe_offset=tid >> 1] >> UInt8(4 * (r & 1))) & UInt8(15))
+            acc += (delta[unsafe_offset=h * 16 + p] * scales_k[unsafe_offset=(c >> 6) * nn + r]) * x[unsafe_offset=c].cast[DType.float32]()
+        barrier()
+    if r < nn:
+        part[unsafe_offset=s * nn + r] = acc
 
 # Reuse-distance probe (read-only, "ovl" mode): for each channel this call selects, the number of tokens since the same linear last selected it
 # (flags hold last-selected position + 1001; stamp = position + 1000, so age = stamp - flag + 1, >= 1). hits[16 * slot + age - 1] += 1 for ages 1..16.
