@@ -934,3 +934,18 @@ b bits). Forced context, scored from stored margins. Data `prims_20261118/plug_t
 - Speed is not measured here: the emulation moves full rows for both tiers. A real two-tier layout (a separate plane
   holding the top 2 bits of each row) is needed for the byte saving to reach the link.
 - Lower splits are being searched next.
+
+Lower splits (data `plug_tiers2/`):
+
+| split | plug MB per token | decided A / B |
+|---|---|---|
+| 10% + next 16% at 2 bits | 290 | 0 / 0 |
+| 12% + next 12% at 2 bits | 290 | 0 / 2 |
+| 12% + next 16% at 2 bits | 322 | 0 / 0 |
+| 10% + next 20% at 2 bits | 322 | 0 / 0 |
+| 15% + next 10% at 2 bits | 322 | 1 / 0 |
+| 8% + next 24% at 2 bits | 322 | 1 / 1 |
+
+- 10% full + 16% at 2 bits lands at 290 MB per token: 22% below the full-plug minimum (370 MB) and 28% below 25%.
+- The edge is not monotone (12% + 12% fails on set B at the same bytes), so 24 prompts resolve the split only to a few
+  points. Searching lower next.
