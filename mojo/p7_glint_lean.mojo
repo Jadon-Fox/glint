@@ -17,7 +17,7 @@ from p7_forward import bf16r, embed_gather, rope, residual_add, swiglu, read_ran
 from p7_glint_gemv_km import glint_gemv_km, gemv_km_combine, GTB
 from p7_decode_fast_kernels import rms_norm_block, logits_warp, ce_argmax_block, margin_block
 from p7_attention_split import attention_split_partial, attention_split_combine, NCH
-from p7_select_device import select_topk, transpose_scales, gather_rows_fix, apply_corr_ksc, apply_corr_kse, combine_corr, KS, GB
+from p7_select_device import select_topk, transpose_scales, gather_rows_fix, apply_corr_ksc, combine_corr, KS, GB
 
 comptime CTX = 2048
 comptime NT = CTX - 1
@@ -371,7 +371,6 @@ def main() raises:
     var k_sel = ctx.compile_function[select_topk[ImmUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin]]()
     var k_gatx = ctx.compile_function[gather_rows_fix[ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin]]()
     var k_corrksc = ctx.compile_function[apply_corr_ksc[ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
-    var k_corrkse = ctx.compile_function[apply_corr_kse[ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
     var k_comb = ctx.compile_function[combine_corr[ImmUntrackedOrigin, MutUntrackedOrigin]]()
     var k_mk = ctx.compile_function[make_tables[ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin]]()
 
@@ -506,8 +505,8 @@ def main() raises:
         frc = parse_ints(open(frcp, "r").read())
         if len(frc) != 12 * 32:
             raise Error("GLINT_FORCE_FILE must hold 12*32 integers")
-    # Overlap baseline (timing only, outputs invalid when set): GLINT_TIME_ABL=1 compute only (the gather stream runs
-    # apply_corr_kse on the stale slot instead of the host-to-slot copy), 2 copy only (per token, only the selection and the
+    # Overlap baseline (timing only, outputs invalid when set): GLINT_TIME_ABL=1 compute only (the host-to-slot copy
+    # is skipped and nothing reads host memory; corrections use the stale slot), 2 copy only (per token, only the selection and the
     # host-to-slot copy for every linear), 3 selection only (2 without the copy), 4 no correction (the corrections and their
     # combine are skipped), 5 = 1 and 4 together.
     var abl_t = parse_uint(getenv("GLINT_TIME_ABL", "0"), "GLINT_TIME_ABL")
@@ -577,8 +576,6 @@ def main() raises:
                     gs.enqueue_function(k_sel, xin16_c[c], idx_b, cnt_b, dummy_log, Int32(0), Int32(kd), Int32(nc[i]), Int32(0), Int32(0), grid_dim=1, block_dim=1024)
                     if abl_t != 1 and abl_t != 5:
                         gs.enqueue_function(k_gatx, plugk_w[i], idx_b, cnt_b, stg32[c], ovl_flags, Int32(n // 8), Int32(c * INTER), Int32((stamp_base + lr) * 2 + 1000), Int32(0), grid_dim=gbk[c], block_dim=128)
-                    else:
-                        gs.enqueue_function(k_corrkse, hk_v[i], sk_v[i], dltb, xin_c[c], idx_b, stg8[c], cnt_b, part_buf, Int32(n), Int32(kd), grid_dim=(ceildiv(n, 128), KS), block_dim=128)
                     gs.record_event(ev_cd[i])
                 ks.enqueue_function(k_gkm, hk32[i], sk_v[i], t0b, xin_c[c], part_g, Int32(n), Int32(kd), Int32(splits_c[c]), grid_dim=(ceildiv(n // 8, GTB), splits_c[c]), block_dim=GTB)
                 ks.enqueue_function(k_gkc, part_g, yout_c[c], Int32(n), Int32(splits_c[c]), grid_dim=ceildiv(n, 128), block_dim=128)

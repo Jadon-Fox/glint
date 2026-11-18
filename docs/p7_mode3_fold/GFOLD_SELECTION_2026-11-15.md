@@ -689,3 +689,21 @@ positions, 3 repeats, medians (runs listed in `summary.txt`).
   per token. Tests: `GLINT_TIME_ABL=5` (no copy and no correction; the chain remains) and `GLINT_ONE_STREAM=1` (all plug
   work on the compute stream; the waits become no-ops).
 - Nsight Systems in the container (2022.4) cannot import its own trace with the available 2025 importer, so no timeline.
+
+### Correction: ABL=1 and ABL=5 still read the plug (2026-11-18)
+
+Found by the lean-decoder build review. In `p7_glint_select_decode.mojo` the copy-skip condition sat on an `if` whose
+`else` branch runs `apply_corr_kse`, the retired `GLINT_EPHEMERAL=1` kernel that reads plug rows straight from pinned host
+memory. So `GLINT_TIME_ABL=1` ("compute only") and `=5` did not skip the plug transfer: they replaced the copy with a
+host-reading correction (racing the normal one on the same buffer under ABL=1). **Withdrawn:** the overlap-baseline
+reading "the copy costs only about 14 ms; the selection-and-correction machinery is the cost", the decomposition row
+"copy skipped", and my statement to the operator that "it can't be PCIe" was borne out. Those rows measured a different
+transfer path, not a path without transfer. Still valid: full, ABL=3 (selection only, 4.7 ms), ABL=4 (no correction),
+fold alone.
+
+One-stream test (`/tmp/p7_sel4`, before the fix, ABL=5 rows invalid for the same reason): all plug work on the compute
+stream is slower, 103.9 / 101.7 ms against 96.1 / 96.7 (35%) and 83.9 against 76.3 (25%), identical outputs. So the
+cross-stream hand-offs are not the cost; the second stream buys some overlap.
+
+Fix: the lean decoder (`mojo/p7_glint_lean.mojo`, 21 kernels, 41 s build, bit-identical on five checks) now skips the
+copy under ABL=1 and 5 without any host read. Corrected decomposition follows.
