@@ -613,3 +613,26 @@ re-runs. Build identity passed.
   class: diminishing returns inside every linear. That is the interior (partial-level) case. The Antigravity design's
   interior-share thesis holds; my coast/burn flight plan does not.
 - Coast alone: 11 / 13 decided flips at 17.6 / 16.8 ms (57 / 60 tok/s). The fold is close but not on the pad.
+
+### Overlap baseline results (2026-11-18)
+
+Data `overlap/`. Transient path, 128 positions, 3 repeats, medians (all runs listed in `summary.txt`). Full runs reproduce
+the identity PPL at 35%.
+
+| share | full | compute only (copy skipped) | copy only (selection + copy, back to back) | coast (fold alone, forced rollout) |
+|---|---|---|---|---|
+| 35% | 89.0 (87.7-90.8) | 75.0 (73.9-75.1) | 172.9 (170.6-173.5) | 17-18 |
+| 25% | 72.4 (67.1-74.3) | 58.0 (56.6-58.1) | 166.5 (163.1-175.4) | 17-18 |
+
+- **H-O1 FALSIFIED, and the pre-registered formula does not apply.** "Copy only" turned out to include the 128
+  selections per token run back to back, and it barely changes with bytes (172.9 vs 166.5 ms for 566 vs about 404 MB),
+  so it is dominated by per-linear fixed cost, not transfer. The formula copy + compute - full is not meaningful here.
+- **The copy is not the cost.** Adding the plug copy to compute-only costs 14.0 ms at 35% and 14.4 ms at 25%. Moving those
+  bytes at the measured 9 GB/s alone would take about 63 and 45 ms, so at least 78% (35%) and 68% (25%) of the transfer is
+  already hidden behind other work.
+- **The cost is the selection-and-correction machinery.** Compute-only at 35% is 75 ms against about 18 ms for the fold
+  alone: about 57 ms per token comes from per-linear selection, the correction kernels and the event round trips between
+  streams (each linear's correction waits for its selection and copy). At 25% it is about 40 ms. The operator's statement
+  "it can't be PCIe" (2026-11-15) is borne out; my 2026-11-15 reading that the link was about 4/5 of marginal byte cost
+  was a fit of time against bytes that could not separate the two, because the selection work grows with the share too.
+- Next: decompose those 57 ms with two more timing modes (`GLINT_TIME_ABL=3` selection only, `4` no correction).
