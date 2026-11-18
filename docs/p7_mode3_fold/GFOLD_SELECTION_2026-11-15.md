@@ -707,3 +707,31 @@ cross-stream hand-offs are not the cost; the second stream buys some overlap.
 
 Fix: the lean decoder (`mojo/p7_glint_lean.mojo`, 21 kernels, 41 s build, bit-identical on five checks) now skips the
 copy under ABL=1 and 5 without any host read. Corrected decomposition follows.
+
+### Corrected decomposition (2026-11-18, lean decoder with the fix)
+
+Data `prims_20261118/decomp2/`. Build `/tmp/p7_lean2` in 38 s; identity passed (35%, PPL 74.34960059115652, 120/128).
+Transient path, 128 positions, 3 repeats, medians.
+
+| mode | 35% | 25% |
+|---|---|---|
+| full | 92.8 | 70.9 |
+| correction skipped (copy remains) | 79.0 | 62.3 |
+| copy skipped (corrections remain, no host read) | 31.9 | 27.8 |
+| neither (selection and stream hand-offs remain) | 18.4 | 18.2 |
+| fold alone | 17.6 | 17.6 |
+| one stream, full | 98.3 | 77.9 |
+| one stream, neither | 22.2 | 22.2 |
+
+- **The plug copy is the cost.** Copy alone adds 61 ms at 35% and 44 ms at 25% over the selection-only run: about 566 and
+  404 MB in those times, 9.3 and 9.2 GB/s, the zero-copy gather's measured rate. Corrections add 14 / 10 ms. Selection and
+  the 256 cross-stream hand-offs per token add 0.6 to 0.8 ms in total.
+- **The copy is on the critical path, not overlapped.** Full is about copy-only plus corrections (92.8 against 79.0 +
+  13.5). Each linear's copy can start only once its activation exists, and its correction waits for it.
+- So my first reading (2026-11-15: the link carries most of the marginal cost, about 9 GB/s) stands, and the operator's
+  statement "it can't be PCIe" is not supported by this measurement. The withdrawn reading in between came from the
+  ABL=1 bug.
+- What this sets: compute without the copy is 31.9 / 27.8 ms. A prefetch that moves the same bytes while compute runs
+  would give about max(copy, compute) = 61 / 44 ms per token (16 / 23 tok/s) at the same bytes; fewer fresh bytes per
+  token (reuse across tokens) lowers the copy side further. The two levers are overlap (predict and prefetch ahead) and
+  reuse (do not re-fetch rows already in VRAM).
