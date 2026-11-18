@@ -511,3 +511,19 @@ Decided flips had reference gaps of 0.75 to 3.50 logits (most 1.00).
   returns within a linear, the condition under which intermediate burn levels pay (operator, "quarter burn").
 - Reading for the planner: the burn should go to qkv and gate+up, at partial levels, not to o and down. The burn-window
   sweep gives the layer axis.
+
+## Overlap baseline on the transient path (pre-registered 2026-11-18, before any run)
+
+Step 1 of the prefetch rebuild. Switch `GLINT_TIME_ABL` (timing only, outputs invalid): 1 = compute only (the transient
+path skips its host-to-slot plug copy), 2 = copy only (per token, only the selection and the host-to-slot copy for every
+linear, back to back on the gather stream). Method as in MOJO_GLINT_DECODE "Streamed decode: copy, compute and overlap":
+overlap = copy-only + compute-only - full, 3 repeats each, median, 35% and 25%, 128 positions.
+
+Correction to my 2026-11-18 chat statement: the transient path's gather (`gather_rows_fix`) is already a persistent
+kernel of GB = 16 blocks reading 16-byte vectors, not one block per row (that was the older skeleton gather). What it
+cannot do is start early: it selects on the layer's true activation, so each linear's copy starts only when that
+activation exists, and the correction waits for it.
+
+- H-O1. Overlap is small: overlap < 25% of the shorter side at both shares. This would mean fetch and compute mostly take
+  turns, and the speed-up available from true prefetch is about min(copy, compute) per token. Falsified if overlap >= 25%.
+- Also reported: copy-only bandwidth = selected bytes / copy-only time, against 11.2 GB/s measured for the copy engine.

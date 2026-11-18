@@ -1064,6 +1064,13 @@ def main() raises:
         if len(frc) != 12 * 32:
             raise Error("GLINT_FORCE_FILE must hold 12*32 integers")
     print("MOJO_GLINT_ATTR full_class_mask", full_mask, "forced", len(frc) > 0)
+    # Overlap baseline (timing only, outputs invalid when set): GLINT_TIME_ABL=1 compute only (transient path skips its
+    # host-to-slot plug copy), 2 copy only (per token, only the selection and the host-to-slot copy for every linear).
+    var abl_t = 0
+    for b in getenv("GLINT_TIME_ABL", "0").as_bytes():
+        abl_t = abl_t * 10 + Int(b) - 48
+    if abl_t > 0:
+        print("MOJO_GLINT_TIME_ABL", abl_t, "outputs invalid")
     print("MOJO_GLINT_ESC margin_on", mrg_on, "m100", esc_m100, "pct", esc_pct)
     # Relational price (H-G2r): GLINT_TAU_Q10 = tau * 1024; every linear's threshold is tau * mean|x| of its own input, per token.
     var tau_q10 = 0
@@ -1116,6 +1123,16 @@ def main() raises:
         ctx.enqueue_copy(dst_buf=tokd, src_buf=tokh)
         var cv = DeviceBuffer[DType.float32](ctx, ct.unsafe_ptr().unsafe_offset(q * (ROT // 2)), ROT // 2, owning=False)
         var sv = DeviceBuffer[DType.float32](ctx, st.unsafe_ptr().unsafe_offset(q * (ROT // 2)), ROT // 2, owning=False)
+        if ahead and abl_t == 2:
+            for lr in range(LAYERS):
+                for c in range(4):
+                    if nc[lr * 4 + c] == 0:
+                        continue
+                    var xin = hbf16 if c == 0 or c == 2 else (attnb16 if c == 1 else actb16)
+                    gs.enqueue_function(k_sel, xin, idx_b, cnt_b, dummy_log, Int32(0), Int32(INTER if c == 3 else H), Int32(nc[lr * 4 + c]), Int32(tk[lr * 4 + c]), Int32(nfi if c == 3 else nfh), grid_dim=1, block_dim=1024)
+                    gs.enqueue_function(k_gatx, plugk_w[lr * 4 + c], idx_b, cnt_b, stg32[(lr % rslots) * 4 + c], ovl_flags, Int32(nout[c] // 8), Int32(((lr % rslots) * 4 + c) * INTER), Int32((itn * LAYERS + lr) * 2 + 1000), Int32(reuse_win), grid_dim=GB, block_dim=128)
+            gs.synchronize()
+            continue
         if ahead:
             var par = pos % 2
             ctx.enqueue_function(k_embed, emb, tokd, x, grid_dim=ceildiv(H, 256), block_dim=256)
@@ -1174,7 +1191,7 @@ def main() raises:
                         ks.record_event(ev_in2[lr * 4 + 0])
                         gs.enqueue_wait_for(ev_in2[lr * 4 + 0])
                         gs.enqueue_function(k_sel, hbf16, idx_b, cnt_b, dummy_log, Int32(0), Int32(H), Int32(nc[lr * 4 + 0]), Int32(tk[lr * 4 + 0]), Int32(nfh), grid_dim=1, block_dim=1024)
-                        if eph2:
+                        if eph2 and abl_t != 1:
                             gs.enqueue_function(k_gatx, plugk_w[lr * 4 + 0], idx_b, cnt_b, stg32[(lr % rslots) * 4 + 0], ovl_flags, Int32(nout[0] // 8), Int32(((lr % rslots) * 4 + 0) * INTER), Int32((itn * LAYERS + lr) * 2 + 1000), Int32(reuse_win), grid_dim=GB, block_dim=128)
                         else:
                             gs.enqueue_function(k_corrkse, hk_v[lr * 4 + 0], sk_v[lr * 4 + 0], dltb, hbf, idx_b, cst[lr * 4 + 0], cnt_b, part_buf, Int32(QKV), Int32(H), grid_dim=(ceildiv(QKV, 128), KS), block_dim=128)
@@ -1198,7 +1215,7 @@ def main() raises:
                         ks.record_event(ev_in2[lr * 4 + 1])
                         gs.enqueue_wait_for(ev_in2[lr * 4 + 1])
                         gs.enqueue_function(k_sel, attnb16, idx_b, cnt_b, dummy_log, Int32(0), Int32(H), Int32(nc[lr * 4 + 1]), Int32(tk[lr * 4 + 1]), Int32(nfh), grid_dim=1, block_dim=1024)
-                        if eph2:
+                        if eph2 and abl_t != 1:
                             gs.enqueue_function(k_gatx, plugk_w[lr * 4 + 1], idx_b, cnt_b, stg32[(lr % rslots) * 4 + 1], ovl_flags, Int32(nout[1] // 8), Int32(((lr % rslots) * 4 + 1) * INTER), Int32((itn * LAYERS + lr) * 2 + 1000), Int32(reuse_win), grid_dim=GB, block_dim=128)
                         else:
                             gs.enqueue_function(k_corrkse, hk_v[lr * 4 + 1], sk_v[lr * 4 + 1], dltb, attnb, idx_b, cst[lr * 4 + 1], cnt_b, part_buf, Int32(H), Int32(H), grid_dim=(ceildiv(H, 128), KS), block_dim=128)
@@ -1220,7 +1237,7 @@ def main() raises:
                         ks.record_event(ev_in2[lr * 4 + 2])
                         gs.enqueue_wait_for(ev_in2[lr * 4 + 2])
                         gs.enqueue_function(k_sel, hbf16, idx_b, cnt_b, dummy_log, Int32(0), Int32(H), Int32(nc[lr * 4 + 2]), Int32(tk[lr * 4 + 2]), Int32(nfh), grid_dim=1, block_dim=1024)
-                        if eph2:
+                        if eph2 and abl_t != 1:
                             gs.enqueue_function(k_gatx, plugk_w[lr * 4 + 2], idx_b, cnt_b, stg32[(lr % rslots) * 4 + 2], ovl_flags, Int32(nout[2] // 8), Int32(((lr % rslots) * 4 + 2) * INTER), Int32((itn * LAYERS + lr) * 2 + 1000), Int32(reuse_win), grid_dim=GB, block_dim=128)
                         else:
                             gs.enqueue_function(k_corrkse, hk_v[lr * 4 + 2], sk_v[lr * 4 + 2], dltb, hbf, idx_b, cst[lr * 4 + 2], cnt_b, part_buf, Int32(2 * INTER), Int32(H), grid_dim=(ceildiv(2 * INTER, 128), KS), block_dim=128)
@@ -1241,7 +1258,7 @@ def main() raises:
                         ks.record_event(ev_in2[lr * 4 + 3])
                         gs.enqueue_wait_for(ev_in2[lr * 4 + 3])
                         gs.enqueue_function(k_sel, actb16, idx_b, cnt_b, dummy_log, Int32(0), Int32(INTER), Int32(nc[lr * 4 + 3]), Int32(tk[lr * 4 + 3]), Int32(nfi), grid_dim=1, block_dim=1024)
-                        if eph2:
+                        if eph2 and abl_t != 1:
                             gs.enqueue_function(k_gatx, plugk_w[lr * 4 + 3], idx_b, cnt_b, stg32[(lr % rslots) * 4 + 3], ovl_flags, Int32(nout[3] // 8), Int32(((lr % rslots) * 4 + 3) * INTER), Int32((itn * LAYERS + lr) * 2 + 1000), Int32(reuse_win), grid_dim=GB, block_dim=128)
                         else:
                             gs.enqueue_function(k_corrkse, hk_v[lr * 4 + 3], sk_v[lr * 4 + 3], dltb, actb, idx_b, cst[lr * 4 + 3], cnt_b, part_buf, Int32(H), Int32(INTER), grid_dim=(ceildiv(H, 128), KS), block_dim=128)
