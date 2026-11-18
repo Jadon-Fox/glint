@@ -667,3 +667,25 @@ Per-class shares (q, o, gate+up, down percent), forced context, scored from stor
   least one set. At this resolution the per-byte costate is close to balanced across classes, so the uniform interior
   share is already near the G-fold optimum on the class axis. Antigravity's o/down floor of about 15% is consistent
   with this; its claim that o and down can sit far below qkv and gate+up is not supported at 25% total.
+
+### Decomposition of the per-linear machinery (2026-11-18)
+
+Data `prims_20261118/decomp/`. Build `/tmp/p7_sel3`, identity passed (35%, PPL 74.34960059115652). Transient path, 128
+positions, 3 repeats, medians (runs listed in `summary.txt`).
+
+| mode | 35% | 25% |
+|---|---|---|
+| full | 96.0 | 72.4 |
+| copy skipped (`ABL=1`) | 83.2 | 63.8 |
+| correction skipped (`ABL=4`) | 85.4 | 65.4 |
+| selection only, back to back (`ABL=3`) | 4.7 | 4.8 |
+| fold alone (share 0) | 19.1 | 19.1 |
+
+- Selection is cheap: 128 selections cost 4.7 ms per token.
+- Removing the copy saves 12.8 / 8.6 ms; removing the corrections saves 10.6 / 7.0 ms. Neither alone comes close to the
+  fold-alone 19.1 ms: both modes still sit 45 to 66 ms above it. So most of the cost is common to both, i.e. neither the
+  bytes nor the correction arithmetic. Hypothesis (next test): the per-linear cross-stream event chain (compute records,
+  gather stream waits, selects, copies, records; compute waits) leaves the GPU idle between dependent steps, 128 times
+  per token. Tests: `GLINT_TIME_ABL=5` (no copy and no correction; the chain remains) and `GLINT_ONE_STREAM=1` (all plug
+  work on the compute stream; the waits become no-ops).
+- Nsight Systems in the container (2022.4) cannot import its own trace with the available 2025 importer, so no timeline.
