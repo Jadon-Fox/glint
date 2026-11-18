@@ -992,3 +992,20 @@ pinned HI plane (top 2 bits) and LO plane (low 2 bits); the wide set fetches HI 
 - The real planes do save link time where bytes differ at equal machinery: real 12/28 is 7.9 ms faster than emulated
   12/28 for 242 MB less traffic.
 - Cost: about 1.6 GB more pinned host memory (the two planes next to the original plug); no VRAM change.
+
+### Fused two-tier path (2026-11-18)
+
+`GLINT_TIER2_FUSED` (commit 28aa051, kernels in `mojo/p7_plug_planes.mojo`), on top of `GLINT_TIER2_REAL`. Data and
+gates `prims_20261118/tier_fused/` (`summary.txt`). Modes: `sel` one selection launch for both sets; `x` also one gather
+launch and one correction launch with the unfused arithmetic (bit-identical); `1` one pass over the wide list with top-set
+membership by key threshold (summation order changes).
+
+- Gates: normal path identity passed; `sel` and `x` identical to the unfused real path at every position (12/28, 10/26);
+  `x` rollouts identical on both sets (0 decided). `1` drifts by fp32 order (max per-linear difference 3.6e-5) and shows
+  1 decided flip on set B at (3, 7): fails the landing gate.
+- Speed, teacher-forced 128, 3 interleaved repeats on a quiet host (medians, ms/token): normal 23% 58.17; real unfused
+  10/26 69.09; `sel` 68.32; `x` 65.65; `1` 62.63. Host enqueue falls from 8.8 to 1.6 ms/token with the fused launches.
+- Still slower than normal 23%. Nsight Systems kernel totals per token (normal 23% / mode 1): gather 37.1 / 31.3 ms (the
+  byte saving), selection 5.7 / 8.6, correction 7.1 / 14.5. With corrections off (timing only) mode 1 beats normal
+  (47.9 vs 50.8), so the remaining gap is the plane correction, about 1.7x the per-channel cost of the normal one; cause
+  not found (a branch-free variant gave the same time).
