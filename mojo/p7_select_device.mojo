@@ -123,6 +123,9 @@ def select_topk[
             thr = thf
         if thr < thr_cap:
             thr = thr_cap
+    # nsel = 0 selects nothing (coast on the fold alone); without this the bisection keeps the largest key.
+    if Int(nsel) == 0:
+        thr = 32768
     var mine = 0
     for i in range(lo_i, hi_i):
         if (Int(x[unsafe_offset=i]) & 32767) >= thr:

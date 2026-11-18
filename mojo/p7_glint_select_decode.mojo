@@ -1027,10 +1027,24 @@ def main() raises:
     var full_mask = 0
     for b in getenv("GLINT_FULL_CLASS", "0").as_bytes():
         full_mask = full_mask * 10 + Int(b) - 48
+    # GLINT_BURN = "a-b": layers a..b-1 get the full plug in every class; all other layers keep the percent share (0 = coast on
+    # the fold alone). Burn-window test of the coast/burn flight plan (GFOLD_SELECTION, "G-fold rebuilt to our intent").
+    var burn_a = -1
+    var burn_b = -1
+    var bcur = 0
+    for b in getenv("GLINT_BURN", "").as_bytes():
+        if b == 45:
+            burn_a = bcur
+            bcur = 0
+        else:
+            bcur = bcur * 10 + Int(b) - 48
+    if burn_a >= 0:
+        burn_b = bcur
+    print("MOJO_GLINT_BURN layers", burn_a, burn_b)
     var nc = List[Int]()
     for l in range(LAYERS):
         for c in range(4):
-            var full = (full_mask >> c) & 1 == 1
+            var full = (full_mask >> c) & 1 == 1 or (l >= burn_a and l < burn_b)
             nc.append((INTER if c == 3 else H) if full else (ni[l] if c == 3 else nh[l]))
     var frc = List[Int]()
     var frcp = getenv("GLINT_FORCE_FILE", "")
@@ -1083,7 +1097,7 @@ def main() raises:
                 nh[l] = (esc_pct * H + 99) // 100 if esc_now else nh_base[l]
                 ni[l] = (esc_pct * INTER + 99) // 100 if esc_now else ni_base[l]
                 for c in range(4):
-                    if (full_mask >> c) & 1 == 0:
+                    if (full_mask >> c) & 1 == 0 and not (l >= burn_a and l < burn_b):
                         nc[l * 4 + c] = ni[l] if c == 3 else nh[l]
         # Free-running rollout (Amendment 3 protocol): 12 prompts of 64 evaluation-text tokens at offsets 0,128,...,1408, then 32 greedy
         # steps; per prompt 95 forward passes (positions 0..94), generated token s is the argmax at position 63+s and is fed at 64+s.

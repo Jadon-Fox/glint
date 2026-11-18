@@ -441,3 +441,37 @@ logit gap between its token and the arm's token (`GLINT_ALT_FILE` on a reference
   by at least half while no other single class does. If two or more do, or none does, the report says so.
 - Sanity. Forced 35% must reproduce the free-running 35% tokens at every position before that prompt's first departure.
   The build identity check must give PPL 74.34960059115652.
+
+## G-fold rebuilt to our intent: coast and burn (2026-11-18)
+
+Operator direction (2026-11-18, restated in their terms): the math is ours to shape. Fidelity is not optimized; it is
+the landing standard, fixed like G-fold's landing conditions. The slack variable is "completely dependent upon how much
+we try to change something at one period of time". Burn "full tilt" until the point where it enters the plug. Configure
+G-fold to that intent, then build everything else to hold the straight lines.
+
+Formulation (agent derivation from that direction):
+- Time step = layer l = 0..31; one token's forward pass is one flight.
+- State = residual stream h_l. Each layer adds into it, so a correction at layer l propagates forward by addition. This is
+  the linear part that holds the straight lines. Norms, SwiGLU and attention softmax bend them and are measured, not fought.
+- Slack = Gamma_l, the change the plug may make at layer l (bytes moved at that layer). Fuel = sum over l of Gamma_l.
+- Coast = the fold alone. Burn = full plug.
+- Landing standard. (1) Position: the token lands in the accepted zone (the reference's choice, or a token the reference
+  scores within the landing margin; 0.50 logits measured so far). The number is the operator's to set. (2) Velocity: the
+  error the token leaves in the key/value cache stays under a bound (agent reading of "speed at which it hits the ground").
+- Structure: linear in control with chosen levels, so the optimum is coast or burn per layer (straight lines between
+  levels). One price compares each layer's landing effect per byte. That effect is the costate.
+- Limit: a layer's plug corrects only that layer's own error, so the burn window is not automatically the last layers. It
+  is wherever the landing is most sensitive per byte, and that has to be measured.
+
+Today's runs burn the same share in every layer for the whole flight, which is the opposite of this plan.
+
+Switch `GLINT_BURN=a-b`: layers a..b-1 get the full plug in every class; all other layers keep the percent share. Percent
+0 now selects nothing (before this change the selector kept the largest channel), so 0 is a true coast.
+
+**Burn-window sweep (pre-registered before the run).** Forced reference context, both prompt sets, base share 0 (coast).
+Windows of 8 layers at starts 0, 4, 8, ..., 24 (7 windows), plus coast-only. Output per window: decided flips D, tie flips,
+ms/token. Costate estimate per window = (D(coast) - D(window)) / (ms(window) - ms(coast)).
+- H-B1. The costate is not uniform: the best window removes at least 2x the decided flips per ms of the worst window.
+  Falsified if all windows are within 2x of one another. A uniform costate would mean the uniform share was already right.
+- H-B2. A flight plan that burns only the top windows by costate, at the bytes of uniform 25%, has fewer decided flips
+  than uniform 25%. Run only after H-B1 passes.
