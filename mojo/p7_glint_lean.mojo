@@ -529,11 +529,29 @@ def main() raises:
     var cls_pct = parse_class4(getenv("GLINT_CLASS_PCT", ""), -1)
     var gbk = parse_class4(getenv("GLINT_GB", ""), GB)
     print("MOJO_GLINT_CLASS pct", cls_pct[0], cls_pct[1], cls_pct[2], cls_pct[3], "gather_blocks", gbk[0], gbk[1], gbk[2], gbk[3])
+    # GLINT_LAYER_PCT = 32 comma-separated percents: plug share per layer (every class), replacing the uniform share.
+    # A class share from GLINT_CLASS_PCT, when set, still wins for that class.
+    var lay_pct = List[Int]()
+    var lps = getenv("GLINT_LAYER_PCT", "")
+    if lps != "":
+        lay_pct = parse_ints(lps)
+        if len(lay_pct) != LAYERS:
+            raise Error("GLINT_LAYER_PCT must hold 32 integers")
     var nc = List[Int]()
-    for _ in range(LAYERS):
+    for l in range(LAYERS):
         for c in range(4):
-            var share = cls_pct[c] if cls_pct[c] >= 0 else pct
+            var share = pct
+            if len(lay_pct) > 0:
+                share = lay_pct[l]
+            if cls_pct[c] >= 0:
+                share = cls_pct[c]
             nc.append((share * kin[c] + 99) // 100)
+    if len(lay_pct) > 0:
+        var lb = 0
+        for l in range(LAYERS):
+            for c in range(4):
+                lb += nc[l * 4 + c] * nout[c] // 2
+        print("MOJO_GLINT_LAYER_PCT plug_bytes_per_token", lb)
     # GLINT_FORCE_FILE = 12*32 integers: in rollout mode the generated positions are fed these tokens instead of the run's own
     # argmax, so every position is scored in the same context.
     var frc = List[Int]()

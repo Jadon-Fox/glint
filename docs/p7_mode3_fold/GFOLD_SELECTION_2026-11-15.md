@@ -807,3 +807,23 @@ bytes whose rows were selected within the last W tokens: the VRAM a bounded pool
 - So on this model the speed-for-VRAM trade is roughly linear, and the operator's "without taking up more VRAM" goal and
   this lever conflict. A bounded pool of B MB would get about the speed of the window whose resident size is B (LRU is
   assumed to behave like the window; not measured). Choosing B is the operator's call.
+
+## Minimum plug share per layer (2026-11-18)
+
+Operator direction (2026-11-18): "the goal is make the vram operating part as small as possible this may inform us that
+there is a bare min amount needed per layer and peer head etc. or a percentage per". Switch `GLINT_LAYER_PCT` (32
+percents, every class) in the lean decoder, build `/tmp/p7_lean6`, identity passed. Forced context, both sets, scored
+from stored reference margins. One 8-layer band lowered at a time, every other layer at 25%.
+
+| band lowered | to 15%: decided A / B | to 5%: decided A / B |
+|---|---|---|
+| none (uniform 25%) | 0 / 0 | |
+| layers 0-7 | 0 / 0 | 2 / 2 |
+| layers 8-15 | 0 / 0 | 1 / 2 |
+| layers 16-23 | 2 / 1 | 2 / 1 |
+| layers 24-31 | 3 / 3 | 4 / 2 |
+
+- The minimum is not uniform across depth. Layers 0-15 land at 15% (and not at 5%); layers 16-31 do not land at 15%.
+- At the margin the later layers need the larger share. The burn sweep's "layers 0-7 matter most" measured a different
+  thing (full plug in one window, every other layer at 0) and does not carry over to small changes around 25%.
+- Each band at 15% saves 40 MB per token (10% of the 402 MB at uniform 25%). Combined profiles follow.
