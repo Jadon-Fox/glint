@@ -774,3 +774,36 @@ runs give the identity PPL). 128 positions, 2 repeats. The machine was less load
   window is the next build. Its expected time is compute plus only the fresh rows on the critical path.
 - Cost not yet bounded: these slots hold the whole plug (1.61 GB of VRAM). The operator's goal is no extra VRAM, so the
   rows actually resident within a window W have to be counted and fitted into a bounded pool before this is a design.
+
+### Cross-token reuse in the real decode path, and the VRAM it needs (2026-11-18)
+
+`GLINT_REUSE=W` in the lean decoder (build `/tmp/p7_lean5`, 52 s): no oracle, no prediction. Each linear keeps its own
+channel-addressed slot; a selected row fetched within the last W tokens is not fetched again. Outputs identical to the
+normal path (all runs give the identity PPL; W = 16 checked position by position). 128 positions, 2 repeats (the machine
+load moved between repeats, so read the two columns separately). `GLINT_REUSE_STAT=1` samples every 16 tokens the plug
+bytes whose rows were selected within the last W tokens: the VRAM a bounded pool would need to hold that window.
+
+| share | W | ms/token r1 / r2 | rows resident for the window (MB) |
+|---|---|---|---|
+| 35% | 0 (normal) | 83.4 / 97.2 | 566 (one token's selection, transient) |
+| 35% | 1 | 61.6 / 69.8 | 881 |
+| 35% | 2 | 47.2 / 57.3 | 1085 |
+| 35% | 4 | 38.6 / 46.1 | 1317 |
+| 35% | 8 | 34.4 / 41.0 | 1496 |
+| 35% | 16 | 40.5 / 40.6 | 1573 |
+| 25% | 0 (normal) | 75.9 / 76.4 | 404 |
+| 25% | 1 | 58.8 / 59.4 | 660 |
+| 25% | 2 | 51.8 / 51.7 | 846 |
+| 25% | 4 | 42.7 / 43.1 | 1094 |
+| 25% | 8 | 36.6 / 36.8 | 1348 |
+| 25% | 16 | 34.5 / 32.7 | 1512 |
+
+- Reuse works in the real path without prediction: at 25%, W = 8 gives 36.7 ms (27 tok/s) and W = 16 gives 33.6 ms
+  (30 tok/s), against 76 ms; at 35%, W = 8 gives 34 to 41 ms against 83 to 97 ms.
+- **It costs VRAM nearly in proportion.** The selected rows wander across most of the plug within a few tokens: holding
+  the last 8 tokens' rows takes 1.35 to 1.50 GB of the 1.61 GB plug. At W = 16 it is effectively the whole plug in VRAM,
+  which is the 8-bit-equivalent footprint GLINT exists to avoid. Even W = 1 needs 660 / 881 MB (the current and previous
+  token's rows) for a 22 to 26% speed-up.
+- So on this model the speed-for-VRAM trade is roughly linear, and the operator's "without taking up more VRAM" goal and
+  this lever conflict. A bounded pool of B MB would get about the speed of the window whose resident size is B (LRU is
+  assumed to behave like the window; not measured). Choosing B is the operator's call.

@@ -429,6 +429,12 @@ def main() raises:
     # GLINT_ORACLE_REUSE = W tokens: in pass B a row already fetched into its linear's slot within the last W tokens is not
     # fetched again (plug rows never change, so outputs cannot change; only link bytes drop).
     var oreuse = parse_uint(getenv("GLINT_ORACLE_REUSE", "0"), "GLINT_ORACLE_REUSE")
+    # GLINT_REUSE = W tokens (real decode, no oracle): each linear keeps its own channel-addressed slot and a selected row
+    # fetched within the last W tokens is not fetched again. GLINT_REUSE_STAT=1 samples, every 16 tokens, the plug bytes
+    # whose rows were fetched within the last W tokens (the VRAM a bounded pool would need for that window).
+    var reuse = parse_uint(getenv("GLINT_REUSE", "0"), "GLINT_REUSE")
+    var rstat = getenv("GLINT_REUSE_STAT", "0") == "1"
+    var perlin = oracle or reuse > 0
     var nflag = (LAYERS * 4 + 4) * INTER
     var ovl_flags = ctx.enqueue_create_buffer[DType.int32](nflag)
     var ovl_zero = ctx.enqueue_create_host_buffer[DType.int32](nflag)
@@ -437,13 +443,13 @@ def main() raises:
     ctx.enqueue_copy(dst_buf=ovl_flags, src_buf=ovl_zero)
     var idx_b = ctx.enqueue_create_buffer[DType.int32](8192)
     var cnt_b = ctx.enqueue_create_buffer[DType.int32](1)
-    var idx_all = ctx.enqueue_create_buffer[DType.int32](LAYERS * 4 * 8192 if oracle else 8)
-    var cnt_all = ctx.enqueue_create_buffer[DType.int32](LAYERS * 4 if oracle else 8)
+    var idx_all = ctx.enqueue_create_buffer[DType.int32](LAYERS * 4 * 8192 if perlin else 8)
+    var cnt_all = ctx.enqueue_create_buffer[DType.int32](LAYERS * 4 if perlin else 8)
     var ostg_total = 0
     var ostg_off = List[Int]()
     for i in range(LAYERS * 4):
         ostg_off.append(ostg_total)
-        if oracle:
+        if perlin:
             ostg_total += kin[i % 4] * nout[i % 4] // 2
     var ostg_all = ctx.enqueue_create_buffer[DType.uint8](ostg_total + 16)
     var idxL = List[DeviceBuffer[DType.int32]]()
@@ -451,7 +457,7 @@ def main() raises:
     var ostg8 = List[DeviceBuffer[DType.uint8]]()
     var ostg32 = List[DeviceBuffer[DType.uint32]]()
     for i in range(LAYERS * 4):
-        if oracle:
+        if perlin:
             idxL.append(DeviceBuffer[DType.int32](ctx, idx_all.unsafe_ptr().unsafe_offset(i * 8192), 8192, owning=False))
             cntL.append(DeviceBuffer[DType.int32](ctx, cnt_all.unsafe_ptr().unsafe_offset(i), 1, owning=False))
             var sz = kin[i % 4] * nout[i % 4] // 2
@@ -552,6 +558,9 @@ def main() raises:
     var t1h = ctx.enqueue_create_host_buffer[DType.int32](1)
     var enq_ns = 0
     var orc_ns = 0
+    var rs_sum = 0
+    var rs_n = 0
+    var flh = ctx.enqueue_create_host_buffer[DType.int32](nflag if rstat else 8)
     for pos in range(steps):
         var stamp_base = (pos + 1) * LAYERS
         # Free-running rollout (Amendment 3 protocol): 12 prompts of 64 evaluation-text tokens at offsets 0,128,...,1408, then 32 greedy
@@ -607,14 +616,17 @@ def main() raises:
                     gs.enqueue_wait_for(ev_in2[i])
                     gs.enqueue_function(k_sel, xin16_c[c], idxL[i], cntL[i], dummy_log, Int32(0), Int32(kd), Int32(nc[i]), Int32(0), Int32(0), grid_dim=1, block_dim=1024)
                     if abl_t != 1 and abl_t != 5:
-                        gs.enqueue_function(k_gatx, plugk_w[i], idxL[i], cntL[i], stg32[c], ovl_flags, Int32(n // 8), Int32(c * INTER), Int32((stamp_base + lr) * 2 + 1000), Int32(0), grid_dim=gbk[c], block_dim=128)
+                        if reuse > 0:
+                            gs.enqueue_function(k_gatx, plugk_w[i], idxL[i], cntL[i], ostg32[i], ovl_flags, Int32(n // 8), Int32((i + 4) * INTER), Int32(2000 + pos * 2), Int32(2 * reuse), grid_dim=gbk[c], block_dim=128)
+                        else:
+                            gs.enqueue_function(k_gatx, plugk_w[i], idxL[i], cntL[i], stg32[c], ovl_flags, Int32(n // 8), Int32(c * INTER), Int32((stamp_base + lr) * 2 + 1000), Int32(0), grid_dim=gbk[c], block_dim=128)
                     gs.record_event(ev_cd[i])
                 ks.enqueue_function(k_gkm, hk32[i], sk_v[i], t0b, xin_c[c], part_g, Int32(n), Int32(kd), Int32(splits_c[c]), grid_dim=(ceildiv(n // 8, GTB), splits_c[c]), block_dim=GTB)
                 ks.enqueue_function(k_gkc, part_g, yout_c[c], Int32(n), Int32(splits_c[c]), grid_dim=ceildiv(n, 128), block_dim=128)
                 if nc[i] > 0:
                     ks.enqueue_wait_for(ev_cd[i])
                     if abl_t != 4 and abl_t != 5:
-                        ks.enqueue_function(k_corrksc, hk_v[i], sk_v[i], dltb, xin_c[c], idxL[i], stg8[c], cntL[i], part_buf, Int32(n), Int32(kd), grid_dim=(ceildiv(n, 128), KS), block_dim=128)
+                        ks.enqueue_function(k_corrksc, hk_v[i], sk_v[i], dltb, xin_c[c], idxL[i], ostg8[i] if reuse > 0 else stg8[c], cntL[i], part_buf, Int32(n), Int32(kd), grid_dim=(ceildiv(n, 128), KS), block_dim=128)
                         ks.enqueue_function(k_comb, part_buf, yout_c[c], Int32(n), grid_dim=ceildiv(n, 128), block_dim=128)
             ks.enqueue_function(k_res, down, x, grid_dim=ceildiv(H, 256), block_dim=256)
         ks.enqueue_function(k_normf, x, fnorm, hbf, grid_dim=1, block_dim=256)
@@ -674,6 +686,18 @@ def main() raises:
             gs.synchronize()
             ctx.synchronize()
             orc_ns += Int(perf_counter_ns() - tb0)
+        if rstat and reuse > 0 and pos % 16 == 15:
+            ctx.enqueue_copy(dst_buf=flh, src_buf=ovl_flags)
+            ctx.synchronize()
+            var rb = 0
+            var lim = 2000 + pos * 2 + 1 - 2 * reuse
+            for i in range(LAYERS * 4):
+                var rw = nout[i % 4] // 2
+                for ch in range(kin[i % 4]):
+                    if Int(flh[(i + 4) * INTER + ch]) >= lim:
+                        rb += rw
+            rs_sum += rb
+            rs_n += 1
         if mrg_on and (not roll or q >= 63):
             ctx.enqueue_copy(dst_buf=m1h, src_buf=mv)
             ctx.synchronize()
@@ -722,6 +746,8 @@ def main() raises:
     print("MOJO_GLINT_SELECT_DECODE steps", steps, "duration_s", elapsed, "ms_per_token", elapsed * 1000 / Float64(steps), "tokens_per_s", Float64(steps) / elapsed)
     print("MOJO_GLINT_SELECT_DECODE ppl", exp(total_ce / Float64(steps)), "oracle_top1", matches, "/", steps)
     print("MOJO_ENQ host_enqueue_ms_per_token", Float64(enq_ns) / 1e6 / Float64(steps))
+    if reuse > 0:
+        print("MOJO_REUSE tokens", reuse, "slot_MB", Float64(ostg_total) / 1e6, "resident_window_MB_mean", Float64(rs_sum) / 1e6 / Float64(rs_n) if rs_n > 0 else 0.0, "samples", rs_n)
     if oracle:
         print("MOJO_ORACLE pass_b_ms_per_token", Float64(orc_ns) / 1e6 / Float64(steps), "plug_slots_MB", Float64(ostg_total) / 1e6, "reuse_tokens", oreuse)
     print("MOJO_GLINT_SELECT_DECODE_DONE")
