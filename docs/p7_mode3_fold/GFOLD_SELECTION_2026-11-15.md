@@ -753,3 +753,24 @@ identical to the normal path at 35% and 25% (all 128 positions). 128 positions, 
   the copy. Prediction alone therefore caps at these numbers, and only fewer link bytes per token go further.
 - Next: cross-token reuse inside the oracle (`GLINT_ORACLE_REUSE=W`: a row fetched into its slot within the last W tokens
   is not fetched again).
+
+### Oracle prefetch with cross-token reuse (2026-11-18)
+
+Build `/tmp/p7_lean4`. Same oracle pass B, plus `GLINT_ORACLE_REUSE=W`: rows fetched into their linear's slot within the
+last W tokens are not fetched again. Outputs identical to normal at 35% and 25% (W = 8 checked position by position; all
+runs give the identity PPL). 128 positions, 2 repeats. The machine was less loaded than in the previous batch (normal 81 /
+63 ms against 100 / 76), so compare within this table only.
+
+| share | normal | W=0 | W=1 | W=2 | W=4 | W=8 |
+|---|---|---|---|---|---|---|
+| 35% | 81.3 / 80.9 | 62.4 / 60.5 | 43.5 / 44.8 | 37.6 / 37.9 | 32.7 / 33.2 | 30.7 / 31.3 |
+| 25% | 63.0 / 62.5 | 48.2 / 46.6 | 38.6 / 38.1 | 35.8 / 34.4 | 30.4 / 30.3 | 27.7 / 27.4 |
+
+- With perfect prediction and an 8-token reuse window: 31 ms at 35% (32 tok/s) and 27.5 ms at 25% (36 tok/s), against
+  81 / 63 ms for today's path. That sits close to compute without any copy (31.9 / 27.8 ms in the decomposition), so at
+  W = 8 the link is no longer the limit.
+- Reuse does most of the work: W = 4 alone cuts pass B from 61 to 33 ms at 35%. Reuse does not need prediction (a row
+  already in VRAM is valid whatever the predictor says), so a non-predictive path with per-linear slots and a reuse
+  window is the next build. Its expected time is compute plus only the fresh rows on the critical path.
+- Cost not yet bounded: these slots hold the whole plug (1.61 GB of VRAM). The operator's goal is no extra VRAM, so the
+  rows actually resident within a window W have to be counted and fitted into a bounded pool before this is a design.
