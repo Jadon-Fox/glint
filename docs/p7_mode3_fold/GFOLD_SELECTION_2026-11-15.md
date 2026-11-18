@@ -527,3 +527,9 @@ activation exists, and the correction waits for it.
 - H-O1. Overlap is small: overlap < 25% of the shorter side at both shares. This would mean fetch and compute mostly take
   turns, and the speed-up available from true prefetch is about min(copy, compute) per token. Falsified if overlap >= 25%.
 - Also reported: copy-only bandwidth = selected bytes / copy-only time, against 11.2 GB/s measured for the copy engine.
+
+**Burn sweep, first attempt: invalid (2026-11-18).** Every window ran at coast speed (17.7 to 19.1 ms/token) because the
+plug kernels were guarded by the layer's base share (`nh[l] > 0`), which is 0 when coasting, so `GLINT_BURN` never
+reached them. Data kept at `burn_invalid_guard_bug/` for the record; the coast-only arms are valid (fold alone, forced
+context, rollout positions 0 to 94: 18.9 / 17.8 ms/token). Fix: each guard now tests its own linear's selected count
+`nc[l * 4 + c] > 0`, which equals the old test whenever no window or class mask is set. Sweep re-run follows.
