@@ -18,6 +18,7 @@ from p7_glint_gemv_km import glint_gemv_km, gemv_km_combine, GTB
 from p7_decode_fast_kernels import rms_norm_block, logits_warp, ce_argmax_block, margin_block
 from p7_attention_split import attention_split_partial, attention_split_combine, NCH
 from p7_select_device import select_topk, transpose_scales, gather_rows_fix, apply_corr_ksc, combine_corr, KS, GB
+from p7_plug_planes import split_planes, apply_corr_ksc_planes
 
 comptime CTX = 2048
 comptime NT = CTX - 1
@@ -241,6 +242,12 @@ def main() raises:
             buf[i]=data[i]
         return buf^
 
+    # GLINT_TIER2_REAL=1: the two-tier plug moves real 2-bit rows. Each linear's K-major plug is also kept as two pinned 2-bit planes
+    # (p7_plug_planes.mojo); wide-set channels fetch the HI row, top-set channels the HI and LO rows. Outputs equal the emulation.
+    var tier_real = getenv("GLINT_TIER2_REAL", "0") == "1"
+    var k_spl = ctx.compile_function[split_planes[ImmUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin]]()
+    var plane_hi_host = List[type_of(ctx.enqueue_create_host_buffer[DType.uint8](1))]()
+    var plane_lo_host = List[type_of(ctx.enqueue_create_host_buffer[DType.uint8](1))]()
     var load_t0 = perf_counter_ns()
     var k_tr = ctx.compile_function[transpose_plug[ImmUntrackedOrigin, MutUntrackedOrigin]]()
     var k_trs = ctx.compile_function[transpose_scales[ImmUntrackedOrigin, MutUntrackedOrigin]]()
@@ -291,6 +298,17 @@ def main() raises:
             ctx.enqueue_function(k_tr, src_dev, dst_dev, Int32(nout[j]), Int32(kin[j]), grid_dim=ceildiv(kin[j] * (nout[j] // 2), 256), block_dim=256)
             var pk = ctx.enqueue_create_host_buffer[DType.uint8](nbytes)
             ctx.enqueue_copy(dst_buf=pk, src_buf=dst_dev)
+            if tier_real:
+                var hi_dev = ctx.enqueue_create_buffer[DType.uint8](nbytes // 2)
+                var lo_dev = ctx.enqueue_create_buffer[DType.uint8](nbytes // 2)
+                ctx.enqueue_function(k_spl, dst_dev, hi_dev, lo_dev, Int32(nout[j]), Int32(kin[j]), grid_dim=ceildiv(kin[j] * (nout[j] // 4), 256), block_dim=256)
+                var hh = ctx.enqueue_create_host_buffer[DType.uint8](nbytes // 2)
+                var lh = ctx.enqueue_create_host_buffer[DType.uint8](nbytes // 2)
+                ctx.enqueue_copy(dst_buf=hh, src_buf=hi_dev)
+                ctx.enqueue_copy(dst_buf=lh, src_buf=lo_dev)
+                ctx.synchronize()
+                plane_hi_host.append(hh^)
+                plane_lo_host.append(lh^)
             ctx.synchronize()
             plugk_host.append(pk^)
     var table_ent=pin_h[0][find_entry(pin_h,"_glint_cells")].copy()
@@ -372,6 +390,7 @@ def main() raises:
     var k_gatx = ctx.compile_function[gather_rows_fix[ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin]]()
     var k_corrksc = ctx.compile_function[apply_corr_ksc[ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
     var k_comb = ctx.compile_function[combine_corr[ImmUntrackedOrigin, MutUntrackedOrigin]]()
+    var k_corrpl = ctx.compile_function[apply_corr_ksc_planes[ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
     var k_mk = ctx.compile_function[make_tables[ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin]]()
 
     # parent (NF4) table and cell-minus-parent delta table, built on the device from the pin's own cells
@@ -407,6 +426,8 @@ def main() raises:
     var t0x = ctx.enqueue_create_buffer[DType.float32](256)
     var dltb2 = ctx.enqueue_create_buffer[DType.float32](256)
     var dltbd = ctx.enqueue_create_buffer[DType.float32](256)
+    if tier_real and (tier2 == 0 or pbits != 2):
+        raise Error("GLINT_TIER2_REAL needs GLINT_TIER2_PCT and GLINT_PLUG_BITS=2")
     if tier2 > 0:
         if pbits >= 4:
             raise Error("GLINT_TIER2_PCT needs GLINT_PLUG_BITS < 4")
@@ -461,6 +482,12 @@ def main() raises:
         sk_v.append(DeviceBuffer[DType.float32](ctx, sk_f[i].unsafe_ptr(), nout[jj] * kin[jj] // 64, owning=False))
         hk32.append(DeviceBuffer[DType.uint32](ctx, hk_u8[i].unsafe_ptr().unsafe_bitcast[UInt32](), nout[jj] * kin[jj] // 8, owning=False))
         plugk_w.append(DeviceBuffer[DType.uint32](ctx, plugk_host[i].unsafe_ptr().unsafe_bitcast[UInt32](), kin[jj] * nout[jj] // 8, owning=False))
+    var phi_w = List[DeviceBuffer[DType.uint32]]()
+    var plo_w = List[DeviceBuffer[DType.uint32]]()
+    for i in range(len(plane_hi_host)):
+        var jj = i % 4
+        phi_w.append(DeviceBuffer[DType.uint32](ctx, plane_hi_host[i].unsafe_ptr().unsafe_bitcast[UInt32](), kin[jj] * nout[jj] // 16, owning=False))
+        plo_w.append(DeviceBuffer[DType.uint32](ctx, plane_lo_host[i].unsafe_ptr().unsafe_bitcast[UInt32](), kin[jj] * nout[jj] // 16, owning=False))
     # One transient staging slot per linear class, reused by every layer; channel-addressed (row c of the K-major plug).
     var stg_off = List[Int]()
     var stg_total = 0
@@ -473,6 +500,21 @@ def main() raises:
     for j in range(4):
         stg8.append(DeviceBuffer[DType.uint8](ctx, stg_all.unsafe_ptr().unsafe_offset(stg_off[j]), kin[j] * nout[j] // 2, owning=False))
         stg32.append(DeviceBuffer[DType.uint32](ctx, stg_all.unsafe_ptr().unsafe_offset(stg_off[j]).unsafe_bitcast[UInt32](), kin[j] * nout[j] // 8, owning=False))
+    # Plane staging (GLINT_TIER2_REAL): per class one HI and one LO channel-addressed slot of kin * nout / 4 bytes each.
+    var pst_all = ctx.enqueue_create_buffer[DType.uint8](stg_total + 16 if tier_real else 16)
+    var hst8 = List[DeviceBuffer[DType.uint8]]()
+    var lst8 = List[DeviceBuffer[DType.uint8]]()
+    var hst32 = List[DeviceBuffer[DType.uint32]]()
+    var lst32 = List[DeviceBuffer[DType.uint32]]()
+    if tier_real:
+        for j in range(4):
+            var q4 = kin[j] * nout[j] // 4
+            var hp = pst_all.unsafe_ptr().unsafe_offset(stg_off[j])
+            var lp = pst_all.unsafe_ptr().unsafe_offset(stg_off[j] + q4)
+            hst8.append(DeviceBuffer[DType.uint8](ctx, hp, q4, owning=False))
+            lst8.append(DeviceBuffer[DType.uint8](ctx, lp, q4, owning=False))
+            hst32.append(DeviceBuffer[DType.uint32](ctx, hp.unsafe_bitcast[UInt32](), q4 // 4, owning=False))
+            lst32.append(DeviceBuffer[DType.uint32](ctx, lp.unsafe_bitcast[UInt32](), q4 // 4, owning=False))
     # Last-fetch stamp per (class, channel). Stamps grow across layers, so with no reuse window every selected row is fetched.
     # GLINT_ORACLE=1 (timing study): every token runs twice. Pass A is the normal path and records each linear's true selection;
     # pass B recomputes the token with all 128 plug copies queued at its start (perfect prediction, full overlap). Only pass B is
@@ -487,7 +529,10 @@ def main() raises:
     var reuse = parse_uint(getenv("GLINT_REUSE", "0"), "GLINT_REUSE")
     var rstat = getenv("GLINT_REUSE_STAT", "0") == "1"
     var perlin = oracle or reuse > 0
-    var nflag = (LAYERS * 4 + 4) * INTER
+    if tier_real and perlin:
+        raise Error("GLINT_TIER2_REAL does not combine with GLINT_ORACLE or GLINT_REUSE")
+    # The last 4 * INTER flags are the LO-plane fetch stamps of the real two-tier path (class c at (LAYERS * 4 + 4 + c) * INTER).
+    var nflag = (LAYERS * 4 + 8) * INTER
     var ovl_flags = ctx.enqueue_create_buffer[DType.int32](nflag)
     var ovl_zero = ctx.enqueue_create_host_buffer[DType.int32](nflag)
     for i in range(nflag):
@@ -519,6 +564,11 @@ def main() raises:
             idxL.append(DeviceBuffer[DType.int32](ctx, idx_b.unsafe_ptr(), 8192, owning=False))
             cntL.append(DeviceBuffer[DType.int32](ctx, cnt_b.unsafe_ptr(), 1, owning=False))
     var dummy_log = ctx.enqueue_create_buffer[DType.int32](4)
+    # Selected-channel counts of the current token: slot i = top set of linear i, LAYERS * 4 + i = wide (tier-2) set.
+    var blog = ctx.enqueue_create_buffer[DType.int32](LAYERS * 8)
+    var blog_h = ctx.enqueue_create_host_buffer[DType.int32](LAYERS * 8)
+    var byte_log = getenv("GLINT_BYTE_LOG", "0") == "1"
+    var link_bytes = 0
     var part_buf = ctx.enqueue_create_buffer[DType.float32](KS * 16384)
     var part_g = ctx.enqueue_create_buffer[DType.float32](32 * 16384)
     var hbf16 = DeviceBuffer[DType.uint16](ctx, hbf.unsafe_ptr().unsafe_bitcast[UInt16](), H, owning=False)
@@ -610,6 +660,15 @@ def main() raises:
             for c in range(4):
                 tb += nc[l * 4 + c] * nout[c] // 2 + (nc2[l * 4 + c] - nc[l * 4 + c]) * nout[c] // 2 * pbits // 4
         print("MOJO_GLINT_TIER2 real_layout_plug_bytes_per_token", tb)
+    var nb_top = 0
+    var nb_wide = 0
+    for i in range(LAYERS * 4):
+        nb_top += nc[i] * nout[i % 4] // 2
+        nb_wide += nc2[i] * nout[i % 4] // 2
+    var nb_arm = nb_top
+    if tier2 > 0:
+        nb_arm = nb_top // 2 + nb_wide // 2 if tier_real else nb_wide
+    print("MOJO_LINK_BYTES nominal_per_token", nb_arm, "tier_real", tier_real)
     if len(lay_pct) > 0:
         var lb = 0
         for l in range(LAYERS):
@@ -697,11 +756,15 @@ def main() raises:
                     ks.record_event(ev_in2[i])
                     gs.enqueue_wait_for(ev_in2[i])
                     if tier2 > 0:
-                        gs.enqueue_function(k_sel, xin16_c[c], idx_t2, cnt_t2, dummy_log, Int32(0), Int32(kd), Int32(nc2[i]), Int32(0), Int32(0), grid_dim=1, block_dim=1024)
-                        gs.enqueue_function(k_gatx, plugk_w[i], idx_t2, cnt_t2, stg32[c], ovl_flags, Int32(n // 8), Int32(c * INTER), Int32((stamp_base + lr) * 2 + 1000), Int32(0), grid_dim=gbk[c], block_dim=128)
-                    gs.enqueue_function(k_sel, xin16_c[c], idxL[i], cntL[i], dummy_log, Int32(0), Int32(kd), Int32(nc[i]), Int32(0), Int32(0), grid_dim=1, block_dim=1024)
+                        gs.enqueue_function(k_sel, xin16_c[c], idx_t2, cnt_t2, blog, Int32(LAYERS * 4 + i), Int32(kd), Int32(nc2[i]), Int32(0), Int32(0), grid_dim=1, block_dim=1024)
+                        if tier_real:
+                            gs.enqueue_function(k_gatx, phi_w[i], idx_t2, cnt_t2, hst32[c], ovl_flags, Int32(n // 16), Int32(c * INTER), Int32((stamp_base + lr) * 2 + 1000), Int32(0), grid_dim=gbk[c], block_dim=128)
+                        else:
+                            gs.enqueue_function(k_gatx, plugk_w[i], idx_t2, cnt_t2, stg32[c], ovl_flags, Int32(n // 8), Int32(c * INTER), Int32((stamp_base + lr) * 2 + 1000), Int32(0), grid_dim=gbk[c], block_dim=128)
+                    gs.enqueue_function(k_sel, xin16_c[c], idxL[i], cntL[i], blog, Int32(i), Int32(kd), Int32(nc[i]), Int32(0), Int32(0), grid_dim=1, block_dim=1024)
                     if tier2 > 0:
-                        pass
+                        if tier_real:
+                            gs.enqueue_function(k_gatx, plo_w[i], idxL[i], cntL[i], lst32[c], ovl_flags, Int32(n // 16), Int32((LAYERS * 4 + 4 + c) * INTER), Int32((stamp_base + lr) * 2 + 1000), Int32(0), grid_dim=gbk[c], block_dim=128)
                     elif abl_t != 1 and abl_t != 5:
                         if reuse > 0:
                             gs.enqueue_function(k_gatx, plugk_w[i], idxL[i], cntL[i], ostg32[i], ovl_flags, Int32(n // 8), Int32((i + 4) * INTER), Int32(2000 + pos * 2), Int32(2 * reuse), grid_dim=gbk[c], block_dim=128)
@@ -713,7 +776,12 @@ def main() raises:
                 if nc[i] > 0:
                     ks.enqueue_wait_for(ev_cd[i])
                     if abl_t != 4 and abl_t != 5:
-                        if tier2 > 0:
+                        if tier_real:
+                            ks.enqueue_function(k_corrpl, hk_v[i], sk_v[i], dltb2, xin_c[c], idx_t2, hst8[c], hst8[c], cnt_t2, part_buf, Int32(n), Int32(kd), Int32(0), grid_dim=(ceildiv(n, 128), KS), block_dim=128)
+                            ks.enqueue_function(k_comb, part_buf, yout_c[c], Int32(n), grid_dim=ceildiv(n, 128), block_dim=128)
+                            ks.enqueue_function(k_corrpl, hk_v[i], sk_v[i], dltbd, xin_c[c], idxL[i], hst8[c], lst8[c], cntL[i], part_buf, Int32(n), Int32(kd), Int32(1), grid_dim=(ceildiv(n, 128), KS), block_dim=128)
+                            ks.enqueue_function(k_comb, part_buf, yout_c[c], Int32(n), grid_dim=ceildiv(n, 128), block_dim=128)
+                        elif tier2 > 0:
                             ks.enqueue_function(k_corrksc, hk_v[i], sk_v[i], dltb2, xin_c[c], idx_t2, stg8[c], cnt_t2, part_buf, Int32(n), Int32(kd), grid_dim=(ceildiv(n, 128), KS), block_dim=128)
                             ks.enqueue_function(k_comb, part_buf, yout_c[c], Int32(n), grid_dim=ceildiv(n, 128), block_dim=128)
                             ks.enqueue_function(k_corrksc, hk_v[i], sk_v[i], dltbd, xin_c[c], idxL[i], stg8[c], cntL[i], part_buf, Int32(n), Int32(kd), grid_dim=(ceildiv(n, 128), KS), block_dim=128)
@@ -779,6 +847,21 @@ def main() raises:
             gs.synchronize()
             ctx.synchronize()
             orc_ns += Int(perf_counter_ns() - tb0)
+        if byte_log:
+            ctx.enqueue_copy(dst_buf=blog_h, src_buf=blog)
+            ctx.synchronize()
+            for i in range(LAYERS * 4):
+                if nc[i] == 0:
+                    continue
+                var top = Int(blog_h[i])
+                var wide = Int(blog_h[LAYERS * 4 + i])
+                var rb = nout[i % 4] // 2
+                if tier_real:
+                    link_bytes += top * rb // 2 + wide * rb // 2
+                elif tier2 > 0:
+                    link_bytes += wide * rb
+                else:
+                    link_bytes += top * rb
         if rstat and reuse > 0 and pos % 16 == 15:
             ctx.enqueue_copy(dst_buf=flh, src_buf=ovl_flags)
             ctx.synchronize()
@@ -839,6 +922,8 @@ def main() raises:
     print("MOJO_GLINT_SELECT_DECODE steps", steps, "duration_s", elapsed, "ms_per_token", elapsed * 1000 / Float64(steps), "tokens_per_s", Float64(steps) / elapsed)
     print("MOJO_GLINT_SELECT_DECODE ppl", exp(total_ce / Float64(steps)), "oracle_top1", matches, "/", steps)
     print("MOJO_ENQ host_enqueue_ms_per_token", Float64(enq_ns) / 1e6 / Float64(steps))
+    if byte_log:
+        print("MOJO_LINK_BYTES measured_per_token", Float64(link_bytes) / Float64(steps), "tier_real", tier_real)
     if reuse > 0:
         print("MOJO_REUSE tokens", reuse, "slot_MB", Float64(ostg_total) / 1e6, "resident_window_MB_mean", Float64(rs_sum) / 1e6 / Float64(rs_n) if rs_n > 0 else 0.0, "samples", rs_n)
     if oracle:
@@ -851,6 +936,8 @@ def main() raises:
     _ = kvv.unsafe_ptr()
     _ = table_u8.unsafe_ptr()
     _ = stg_all.unsafe_ptr()
+    _ = pst_all.unsafe_ptr()
+    _ = len(plane_hi_host) + len(plane_lo_host) + len(phi_w) + len(plo_w) + len(hst8) + len(lst8) + len(hst32) + len(lst32)
     _ = ostg_all.unsafe_ptr()
     _ = idx_all.unsafe_ptr()
     _ = cnt_all.unsafe_ptr()
