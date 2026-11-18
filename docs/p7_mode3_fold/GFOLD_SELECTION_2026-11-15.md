@@ -949,3 +949,19 @@ Lower splits (data `plug_tiers2/`):
 - 10% full + 16% at 2 bits lands at 290 MB per token: 22% below the full-plug minimum (370 MB) and 28% below 25%.
 - The edge is not monotone (12% + 12% fails on set B at the same bytes), so 24 prompts resolve the split only to a few
   points. Searching lower next.
+
+Lowest splits (data `plug_tiers3/`), all failing:
+
+| split | plug MB per token | decided A / B |
+|---|---|---|
+| 8% + next 16% at 2 bits | 258 | 1 / 3 |
+| 10% + next 12% at 2 bits | 258 | 1 / 2 |
+| 10% + next 14% at 2 bits | 274 | 0 / 1 |
+| 8% + next 20% at 2 bits | 290 | 1 / 0 |
+| 6% + next 24% at 2 bits | 290 | 1 / 0 |
+| 9% + next 18% at 2 bits | 290 | 1 / 1 |
+
+- At 290 MB only one of five splits lands (10% + 16%), so that pass is at the edge and may be sample luck. At 322 MB two
+  of four land (12% + 16%, 10% + 20%). The two-tier minimum on these 24 prompts is 290 to 322 MB per token, against 370 MB
+  for the best single-level plug: a 13 to 22% cut in link bytes for the same landing standard.
+- Resolving the edge further needs more prompts (a third set and its full-plug reference), not finer splits.
