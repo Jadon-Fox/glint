@@ -965,3 +965,30 @@ Lowest splits (data `plug_tiers3/`), all failing:
   of four land (12% + 16%, 10% + 20%). The two-tier minimum on these 24 prompts is 290 to 322 MB per token, against 370 MB
   for the best single-level plug: a 13 to 22% cut in link bytes for the same landing standard.
 - Resolving the edge further needs more prompts (a third set and its full-plug reference), not finer splits.
+
+### Real two-tier layout on the link (2026-11-18)
+
+`GLINT_TIER2_REAL=1` (commit 9aac869; kernels in `mojo/p7_plug_planes.mojo`): at load each linear's plug is split into a
+pinned HI plane (top 2 bits) and LO plane (low 2 bits); the wide set fetches HI rows, the top set LO rows, and
+`apply_corr_ksc_planes` keeps `apply_corr_ksc`'s arithmetic and order. Data `prims_20261118/tier_real/`.
+
+- Identity: normal path PPL 74.34960059115652; real against emulation identical at every position (12/28 and 10/26,
+  teacher-forced 128) and on the forced rollout (10/26, all 24 roll and margin lines).
+- Link bytes are now real: 290 MB per token at 10/26 (measured 291.7 MB), 322 MB at 12/28 (measured 324.0 MB).
+
+| arm, teacher-forced 128, 3 interleaved repeats | median ms/token | link MB per token |
+|---|---|---|
+| normal 25% | 76.6 | 403 |
+| normal 23% | 76.1 | 371 |
+| real two-tier 12/28 | 89.8 | 322 |
+| real two-tier 10/26 | 83.3 | 290 |
+| emulated two-tier 12/28 | 97.7 | 564 |
+
+- **Slower despite fewer bytes.** Against normal 23%, 10/26 moves 80 MB less (about 8.7 ms at 9.2 GB/s) yet takes 7 ms
+  longer, so the two-tier path carries about 16 ms of other cost per token. Host enqueue time is 10 to 13 ms per token on
+  every tier arm against 2 ms on normal arms (measured). The second selection and the second correction per linear are
+  the likely cause (not profiled). One selection kernel producing both thresholds and one fused two-plane correction would
+  remove a serial step and a launch per linear.
+- The real planes do save link time where bytes differ at equal machinery: real 12/28 is 7.9 ms faster than emulated
+  12/28 for 242 MB less traffic.
+- Cost: about 1.6 GB more pinned host memory (the two planes next to the original plug); no VRAM change.
