@@ -1103,3 +1103,19 @@ missed. Corrections use the exact lists, so outputs are unchanged (128 teacher-f
 - Not yet on the two-tier path: `gather_planes_merge` has no fetch flags, and a predicted wide-only row may need its LO plane
   once the exact top set is known, so the flag must carry top membership. The layer stamps step by 2, so encoding it as
   stamp + 2 would collide with the next layer; this needs its own flag array.
+
+#### Birddog on the two-tier path (2026-11-19)
+
+`GLINT_BIRD=1` with `GLINT_TIER2_FUSED=m`: `gather_planes_merge_f` stamps the HI and LO rows separately (`hflags`, `tflags`), so a
+predicted gather and the exact gather of the same linear share the staging slot; a row is refetched only if it is missing or the
+exact top set needs a LO plane the prediction did not fetch. Stale LO bits on a wide-only channel do not change the `d_pre`
+lookup (one value per prefix group). Each target class now has its own predicted-key buffer, and the compute stream waits for the
+link stream's read of that buffer one layer earlier before rewriting it (Jadon-Fox/glint#128 shared one buffer between gate+up
+and qkv; outputs were unaffected, predictions could have been). Data `lakes/p7_glint/prims_20261119/bird_t2/`.
+
+- Outputs: two-tier 12/28 with and without birddog identical at all 128 teacher-forced positions (PPL 73.47170030217767); full
+  plug with birddog identical to the default path (PPL 72.24476008256185). The landing results for 12/28 therefore stand.
+- 5 interleaved repeats, ms/token sorted (desktop load on the GPU throughout): full plug 23% + birddog 57.1 58.8 58.9 60.6 67.6;
+  two-tier 12/28 59.0 60.3 60.3 63.6 65.8; two-tier 12/28 + birddog 54.8 56.9 59.0 59.0 59.5.
+- Two-tier 12/28 with birddog now matches the full plug with birddog on speed (median 59.0 vs 58.9) while it is the only arm
+  that passes the landing-with-margin gate, on 13% fewer link bytes.

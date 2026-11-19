@@ -18,7 +18,7 @@ from p7_glint_gemv_km import glint_gemv_km, gemv_km_combine, GTB, glint_gemv_km_
 from p7_decode_fast_kernels import rms_norm_block, logits_warp, ce_argmax_block, margin_block
 from p7_attention_split import attention_split_partial, attention_split_combine, NCH
 from p7_select_device import select_topk, transpose_scales, gather_rows_fix, apply_corr_ksc, combine_corr, KS, GB
-from p7_plug_planes import split_planes, apply_corr_ksc_planes, select_topk2, apply_corr_ksc_tier, gather_planes2, apply_corr_ksc_tier_x, combine_corr2, apply_corr_ksc_tier_v, apply_corr_ksc_r, apply_corr_ksc_tier_r, gather_planes_merge, apply_corr_ksc_tier_mr, select_rank_f, add_vec
+from p7_plug_planes import split_planes, apply_corr_ksc_planes, select_topk2, apply_corr_ksc_tier, gather_planes2, apply_corr_ksc_tier_x, combine_corr2, apply_corr_ksc_tier_v, apply_corr_ksc_r, apply_corr_ksc_tier_r, gather_planes_merge, apply_corr_ksc_tier_mr, select_rank_f, add_vec, gather_planes_merge_f
 
 comptime CTX = 2048
 comptime NT = CTX - 1
@@ -450,6 +450,7 @@ def main() raises:
     var k_corrm2 = ctx.compile_function[apply_corr_ksc_tier_mr[2, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
     var k_corrm4 = ctx.compile_function[apply_corr_ksc_tier_mr[4, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
     var k_corrm8 = ctx.compile_function[apply_corr_ksc_tier_mr[8, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
+    var k_gatmf = ctx.compile_function[gather_planes_merge_f[ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin]]()
     var k_gat2 = ctx.compile_function[gather_planes2[ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin]]()
     var k_corrr2 = ctx.compile_function[apply_corr_ksc_r[2, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
     var k_corrtr2 = ctx.compile_function[apply_corr_ksc_tier_r[2, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
@@ -624,6 +625,8 @@ def main() raises:
     for i in range(nflag):
         ovl_zero[i] = 0
     ctx.enqueue_copy(dst_buf=ovl_flags, src_buf=ovl_zero)
+    var tflags = ctx.enqueue_create_buffer[DType.int32](nflag)
+    ctx.enqueue_copy(dst_buf=tflags, src_buf=ovl_zero)
     var idx_b = ctx.enqueue_create_buffer[DType.int32](8192)
     var cnt_b = ctx.enqueue_create_buffer[DType.int32](1)
     var idx_all = ctx.enqueue_create_buffer[DType.int32](LAYERS * 4 * 8192 if perlin else 8)
@@ -664,9 +667,13 @@ def main() raises:
     var actp = ctx.enqueue_create_buffer[DType.float32](INTER)
     var actbp = ctx.enqueue_create_buffer[DType.bfloat16](INTER)
     var hbfp16 = DeviceBuffer[DType.uint16](ctx, hbfp.unsafe_ptr().unsafe_bitcast[UInt16](), H, owning=False)
+    var hbfq = ctx.enqueue_create_buffer[DType.bfloat16](H)
+    var hbfq16 = DeviceBuffer[DType.uint16](ctx, hbfq.unsafe_ptr().unsafe_bitcast[UInt16](), H, owning=False)
     var actbp16 = DeviceBuffer[DType.uint16](ctx, actbp.unsafe_ptr().unsafe_bitcast[UInt16](), INTER, owning=False)
     var idxP = ctx.enqueue_create_buffer[DType.int32](8192)
     var cntP = ctx.enqueue_create_buffer[DType.int32](2)
+    var idxPt = ctx.enqueue_create_buffer[DType.int32](8192)
+    var cntPt = ctx.enqueue_create_buffer[DType.int32](2)
     var attnb16 = DeviceBuffer[DType.uint16](ctx, attnb.unsafe_ptr().unsafe_bitcast[UInt16](), H, owning=False)
     var actb16 = DeviceBuffer[DType.uint16](ctx, actb.unsafe_ptr().unsafe_bitcast[UInt16](), INTER, owning=False)
     # Per linear class (qkv, o, gate+up, down): bf16 input, its raw-bits view for selection, fp32 output, K-split count.
@@ -701,10 +708,12 @@ def main() raises:
     var ev_in2 = List[type_of(emb_done)]()
     var ev_cd = List[type_of(emb_done)]()
     var ev_bd = List[type_of(emb_done)]()
+    var ev_ps = List[type_of(emb_done)]()
     for _ in range(LAYERS * 4):
         ev_in2.append(ctx.create_event())
         ev_cd.append(ctx.create_event())
         ev_bd.append(ctx.create_event())
+        ev_ps.append(ctx.create_event())
 
     # GLINT_ROLL_OFFSET: tokens added to each rollout prompt's start (64 gives 12 prompts disjoint from the default set).
     var roll_off = parse_uint(getenv("GLINT_ROLL_OFFSET", "0"), "GLINT_ROLL_OFFSET")
@@ -859,7 +868,10 @@ def main() raises:
                             gs.enqueue_function(k_sel2, xin16_c[c], idx_t2, cnt_t2, idxL[i], cntL[i], blog, Int32(LAYERS * 4 + i), Int32(i), Int32(kd), Int32(nc2[i]), Int32(nc[i]), grid_dim=1, block_dim=1024)
                         if fused_gat:
                             if fused_merge:
-                                gs.enqueue_function(k_gatm, phi_w[i], plo_w[i], xin16_c[c], idx_t2, cnt_t2, stg32[c], Int32(n // 16), grid_dim=gbk[c], block_dim=128)
+                                if bird:
+                                    gs.enqueue_function(k_gatmf, phi_w[i], plo_w[i], xin16_c[c], idx_t2, cnt_t2, stg32[c], ovl_flags, tflags, Int32(n // 16), Int32(c * INTER), Int32((stamp_base + lr) * 2 + 1000), grid_dim=gbk[c], block_dim=128)
+                                else:
+                                    gs.enqueue_function(k_gatm, phi_w[i], plo_w[i], xin16_c[c], idx_t2, cnt_t2, stg32[c], Int32(n // 16), grid_dim=gbk[c], block_dim=128)
                             else:
                                 gs.enqueue_function(k_gat2, phi_w[i], plo_w[i], xin16_c[c], idx_t2, cnt_t2, hst32[c], lst32[c], Int32(n // 16), grid_dim=gbk[c], block_dim=128)
                         else:
@@ -893,11 +905,15 @@ def main() raises:
                 else:
                     ks.enqueue_function(k_gkm, hk32[i], sk_v[i], t0b, xin_c[c], part_g, Int32(n), Int32(kd), Int32(splits_c[c]), grid_dim=(ceildiv(n // 8, GTB), splits_c[c]), block_dim=GTB)
                 ks.enqueue_function(k_gkc, part_g, yout_c[c], Int32(n), Int32(splits_c[c]), grid_dim=ceildiv(n, 128), block_dim=128)
-                if bird and tier2 == 0 and reuse == 0 and c >= 1 and (c < 3 or lr + 1 < LAYERS):
+                if bird and (tier2 == 0 or fused_merge) and reuse == 0 and c >= 1 and (c < 3 or lr + 1 < LAYERS):
                     var lt = lr + 1 if c == 3 else lr
                     var ct2 = 0 if c == 3 else c + 1
                     var jt = lt * 4 + ct2
                     if nc[jt] > 0:
+                        # Each target class has its own predicted-key buffer; do not overwrite it before the link stream's
+                        # selection for the same class one layer earlier has read it.
+                        if jt >= 4:
+                            ks.enqueue_wait_for(ev_ps[jt - 4])
                         if c == 1:
                             ks.enqueue_function(k_add, x, proj, xp, Int32(H), grid_dim=ceildiv(H, 256), block_dim=256)
                             ks.enqueue_function(k_normf, xp, postnorm_v[lr], hbfp, grid_dim=1, block_dim=256)
@@ -905,14 +921,24 @@ def main() raises:
                             ks.enqueue_function(k_swi, gu, actp, actbp, grid_dim=ceildiv(INTER, 256), block_dim=256)
                         else:
                             ks.enqueue_function(k_add, x, down, xp, Int32(H), grid_dim=ceildiv(H, 256), block_dim=256)
-                            ks.enqueue_function(k_normf, xp, innorm_v[lr + 1], hbfp, grid_dim=1, block_dim=256)
+                            ks.enqueue_function(k_normf, xp, innorm_v[lr + 1], hbfq, grid_dim=1, block_dim=256)
                         ks.record_event(ev_bd[jt])
                         gs.enqueue_wait_for(ev_bd[jt])
-                        if sel_fast:
-                            gs.enqueue_function(k_self1, actbp16 if ct2 == 3 else hbfp16, idxP, cntP, idxP, cntP, dummy_log, Int32(0), Int32(0), Int32(kin[ct2]), Int32(min(kin[ct2], nc[jt] * bird_x // 100)), Int32(0), grid_dim=1, block_dim=1024)
+                        var pk16 = actbp16 if ct2 == 3 else (hbfq16 if ct2 == 0 else hbfp16)
+                        if fused_merge:
+                            if sel_fast:
+                                gs.enqueue_function(k_self2, pk16, idxP, cntP, idxPt, cntPt, dummy_log, Int32(0), Int32(1), Int32(kin[ct2]), Int32(nc2[jt]), Int32(nc[jt]), grid_dim=1, block_dim=1024)
+                            else:
+                                gs.enqueue_function(k_sel2, pk16, idxP, cntP, idxPt, cntPt, dummy_log, Int32(0), Int32(1), Int32(kin[ct2]), Int32(nc2[jt]), Int32(nc[jt]), grid_dim=1, block_dim=1024)
+                            gs.record_event(ev_ps[jt])
+                            gs.enqueue_function(k_gatmf, phi_w[jt], plo_w[jt], pk16, idxP, cntP, stg32[ct2], ovl_flags, tflags, Int32(nout[ct2] // 16), Int32(ct2 * INTER), Int32((stamp_base + lt) * 2 + 1000), grid_dim=gbk[ct2], block_dim=128)
+                        elif sel_fast:
+                            gs.enqueue_function(k_self1, pk16, idxP, cntP, idxP, cntP, dummy_log, Int32(0), Int32(0), Int32(kin[ct2]), Int32(min(kin[ct2], nc[jt] * bird_x // 100)), Int32(0), grid_dim=1, block_dim=1024)
                         else:
-                            gs.enqueue_function(k_sel, actbp16 if ct2 == 3 else hbfp16, idxP, cntP, dummy_log, Int32(0), Int32(kin[ct2]), Int32(min(kin[ct2], nc[jt] * bird_x // 100)), Int32(0), Int32(0), grid_dim=1, block_dim=1024)
-                        gs.enqueue_function(k_gatx, plugk_w[jt], idxP, cntP, stg32[ct2], ovl_flags, Int32(nout[ct2] // 8), Int32(ct2 * INTER), Int32((stamp_base + lt) * 2 + 1000), Int32(0), grid_dim=gbk[ct2], block_dim=128)
+                            gs.enqueue_function(k_sel, pk16, idxP, cntP, dummy_log, Int32(0), Int32(kin[ct2]), Int32(min(kin[ct2], nc[jt] * bird_x // 100)), Int32(0), Int32(0), grid_dim=1, block_dim=1024)
+                        if not fused_merge:
+                            gs.record_event(ev_ps[jt])
+                            gs.enqueue_function(k_gatx, plugk_w[jt], idxP, cntP, stg32[ct2], ovl_flags, Int32(nout[ct2] // 8), Int32(ct2 * INTER), Int32((stamp_base + lt) * 2 + 1000), Int32(0), grid_dim=gbk[ct2], block_dim=128)
                 if nc[i] > 0:
                     ks.enqueue_wait_for(ev_cd[i])
                     if abl_t != 4 and abl_t != 5:
