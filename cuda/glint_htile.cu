@@ -12,6 +12,7 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 static __constant__ float d_cells[16][16];
@@ -22,6 +23,18 @@ static int load_cells() {
         return 0;
     float host_cells[16][16];
     memcpy(host_cells, GLINT_CELLS, sizeof(host_cells));
+    /* GLINT_PARENT_ONLY=1: fold-only arm. Every plug column holds the parent value, so a weight decodes to
+     * PARENT[hole] * absmax (glint_codec.decode_parent_only) whatever the plug nibble says. The plug is not read
+     * for its value. This is the true parent decode; zeroing the plug nibble is not (plug 0 is a child cell). */
+    const char *po = getenv("GLINT_PARENT_ONLY");
+    if (po && po[0] == '1') {
+        static const float PARENT[16] = {-1.0f, -0.6961928009986877f, -0.5250730514526367f, -0.39491748809814453f,
+            -0.28444138169288635f, -0.18477343022823334f, -0.09105003625154495f, 0.0f, 0.07958029955625534f,
+            0.16093020141124725f, 0.24611230194568634f, 0.33791524171829224f, 0.44070982933044434f,
+            0.5626170039176941f, 0.7229568362236023f, 1.0f}; /* glint_codec.PARENT, the QLoRA NF4 table */
+        for (int h = 0; h < 16; h++)
+            for (int p = 0; p < 16; p++) host_cells[h][p] = PARENT[h];
+    }
     if (cudaMemcpyToSymbol(d_cells, host_cells, sizeof(host_cells)) != cudaSuccess)
         return -1;
     once = 1;

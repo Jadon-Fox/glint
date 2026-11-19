@@ -11,6 +11,7 @@
 #include "act_map.h"
 #include "nf4.h"
 #include "../include/glint_htile.h"
+#include "../include/glint_plug_streamer.h"
 #include <vector>
 
 #define INT8_BLOCK 64
@@ -64,6 +65,14 @@ struct GlintLin { uint8_t *hole, *plug; float *am; };
 static int g_glint = 0, g_hole_only = 0;
 static GlintLin g_gl[N_LAYERS][ARM0_N_LINEARS];
 static uint8_t *g_zero_plug = NULL;
+/* --glint-stream PINDIR: hole resident, plugs staged in pinned host RAM and brought in one layer ahead through the
+ * 2-slot ring (glint_plug_streamer). One layer's plug is its four linears back to back (QKV, O, GATE_UP, DOWN). */
+static int g_stream = 0;
+static GlintPlugStreamer *g_streamer = NULL;
+static cudaStream_t g_copy_stream = NULL;
+static const uint8_t *g_plug_src[N_LAYERS][ARM0_N_LINEARS];
+static uint64_t g_plug_off[N_LAYERS][ARM0_N_LINEARS], g_layer_bytes[N_LAYERS];
+static const uint8_t *g_cur_dev_plug = NULL;
 static void glint_upload(const SafeTensors *a, const SafeTensors *b, int l, int j) {
     size_t n = (size_t)ARM0_LINEAR[j].n_out * ARM0_LINEAR[j].k_in;
     char nm[256], pn[300], an[300];
@@ -74,7 +83,9 @@ static void glint_upload(const SafeTensors *a, const SafeTensors *b, int l, int 
     GlintLin &g = g_gl[l][j];
     CK(cudaMalloc(&g.hole, nb)); CK(cudaMemcpy(g.hole, eh->data, nb, cudaMemcpyHostToDevice));
     CK(cudaMalloc(&g.am, ab)); CK(cudaMemcpy(g.am, ea->data, ab, cudaMemcpyHostToDevice));
-    if (g_hole_only) { if (!g_zero_plug) { CK(cudaMalloc(&g_zero_plug, 8192ull * 3072 / 2 * 2)); CK(cudaMemset(g_zero_plug, 0, 8192ull * 3072)); } g.plug = g_zero_plug; }
+    if (g_stream) { /* plug stays on the host; the ring brings it in */
+        g_plug_src[l][j] = (const uint8_t *)ep->data; g_plug_off[l][j] = g_layer_bytes[l]; g_layer_bytes[l] += nb; g.plug = NULL;
+    } else if (g_hole_only) { if (!g_zero_plug) { CK(cudaMalloc(&g_zero_plug, 8192ull * 3072 / 2 * 2)); CK(cudaMemset(g_zero_plug, 0, 8192ull * 3072)); } g.plug = g_zero_plug; }
     else { CK(cudaMalloc(&g.plug, nb)); CK(cudaMemcpy(g.plug, ep->data, nb, cudaMemcpyHostToDevice)); }
 }
 
@@ -88,6 +99,19 @@ static void cublas_linear(void *ctx, int layer, Arm0Linear which, const __nv_bfl
     act_capture(layer, which, x, m);
     if (g_glint) {
         const GlintLin &g = g_gl[layer][which];
+        if (g_stream) {
+            if (which == ARM0_QKV && glint_plug_streamer_acquire(g_streamer, layer, &g_cur_dev_plug) != 0)
+                setup_fail("plug acquire failed layer %d", layer);
+            if (!g_cur_dev_plug) setup_fail("plug for layer %d not acquired (linear order changed)", layer);
+            if (launch_glint_htile_s3_f32_stream(g.hole, g_cur_dev_plug + g_plug_off[layer][which], g.am, x, y, m,
+                                                 ARM0_LINEAR[which].n_out, ARM0_LINEAR[which].k_in, 64, 0) != 0)
+                setup_fail("htile launch failed layer %d", layer);
+            if (which == ARM0_DOWN) {
+                if (glint_plug_streamer_release(g_streamer, layer) != 0) setup_fail("plug release failed layer %d", layer);
+                g_cur_dev_plug = NULL;
+            }
+            return;
+        }
         if (launch_glint_htile_s3_f32(g.hole, g.plug, g.am, x, y, m, ARM0_LINEAR[which].n_out, ARM0_LINEAR[which].k_in, 64) != 0)
             setup_fail("htile launch failed layer %d", layer);
         return;
@@ -111,6 +135,7 @@ int main(int argc, char** argv) {
         else if (strcmp(argv[argi], "--int8") == 0) int8_pin_path = argv[argi + 1];
         else if (strcmp(argv[argi], "--glint") == 0) { glint_dir = argv[argi + 1]; g_glint = 1; }
         else if (strcmp(argv[argi], "--glint-hole-only") == 0) { glint_dir = argv[argi + 1]; g_glint = 1; g_hole_only = 1; }
+        else if (strcmp(argv[argi], "--glint-stream") == 0) { glint_dir = argv[argi + 1]; g_glint = 1; g_stream = 1; }
         else break;
     }
     if (argc - argi != 2) {
@@ -155,7 +180,20 @@ int main(int argc, char** argv) {
         snprintf(b, sizeof(b), "%s/model-00002-of-00002.safetensors", glint_dir);
         if (safetensors_open(&gs1, a) != 0 || safetensors_open(&gs2, b) != 0) setup_fail("cannot open glint pin %s", glint_dir);
         for (int l = 0; l < N_LAYERS; l++) for (int j = 0; j < ARM0_N_LINEARS; j++) glint_upload(&gs1, &gs2, l, j);
-        printf("Glint pin loaded (%s).\n", g_hole_only ? "hole only, plug zeroed" : "hole + plug");
+        if (g_stream) {
+            CK(cudaStreamCreateWithFlags(&g_copy_stream, cudaStreamNonBlocking));
+            if (glint_plug_streamer_create(&g_streamer, N_LAYERS, g_layer_bytes, g_copy_stream, 0) != 0) setup_fail("streamer create failed");
+            for (int l = 0; l < N_LAYERS; l++) {
+                std::vector<uint8_t> cat(g_layer_bytes[l]);
+                for (int j = 0; j < ARM0_N_LINEARS; j++) {
+                    size_t nb = ((size_t)ARM0_LINEAR[j].n_out * ARM0_LINEAR[j].k_in + 1) / 2;
+                    memcpy(cat.data() + g_plug_off[l][j], g_plug_src[l][j], nb);
+                }
+                if (glint_plug_streamer_set_host_data(g_streamer, l, cat.data(), g_layer_bytes[l]) != 0) setup_fail("streamer host data layer %d", l);
+            }
+            if (glint_plug_streamer_start(g_streamer) != 0) setup_fail("streamer start failed");
+        }
+        printf("Glint pin loaded (%s).\n", g_stream ? "hole resident, plug streamed through the 2-slot ring" : (g_hole_only ? "hole only, plug zeroed" : "hole + plug"));
     }
     if (getenv("ARM0_NF4") && getenv("ARM0_NF4_WMAP")) {
         g_nf4_map = fopen(getenv("ARM0_NF4_WMAP"), "w");
@@ -178,6 +216,14 @@ int main(int argc, char** argv) {
     act_map_init(act_map);
     CKB(cublasCreate(&lin.cublas));
     arm0_forward(&model, ev.tokens, cublas_linear, &lin, lin.cublas, dump_dir ? g_dump : NULL, &g_result);
+    if (g_stream) {
+        GlintStreamerStats ss;
+        if (glint_plug_streamer_get_stats(g_streamer, &ss) == 0) {
+            double mx = 0; for (int l = 1; l < ss.n_layers; l++) if (ss.per_layer_stall_ms[l] > mx) mx = ss.per_layer_stall_ms[l];
+            printf("STREAM_STATS h2d_bytes=%llu total_stall_ms=%.3f layer0_stall_ms=%.3f max_stall_ms_layers_1plus=%.3f\n",
+                   (unsigned long long)ss.total_h2d_bytes, ss.total_stall_ms, ss.per_layer_stall_ms[0], mx);
+        }
+    }
     act_map_write(act_map, int8_pin ? "BF16 cuBLAS (INT8-dequantized weights)" : "BF16 cuBLAS (original BF16 weights)");
     const float* h_losses = g_result.losses;
     const int32_t* h_top1 = g_result.top1;
