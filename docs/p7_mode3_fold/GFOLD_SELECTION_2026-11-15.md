@@ -1119,3 +1119,12 @@ and qkv; outputs were unaffected, predictions could have been). Data `lakes/p7_g
   two-tier 12/28 59.0 60.3 60.3 63.6 65.8; two-tier 12/28 + birddog 54.8 56.9 59.0 59.0 59.5.
 - Two-tier 12/28 with birddog now matches the full plug with birddog on speed (median 59.0 vs 58.9) while it is the only arm
   that passes the landing-with-margin gate, on 13% fewer link bytes.
+
+#### Null: predicting o's input (2026-11-19)
+
+o's input is attention over the cache, so the only look-ahead is rope and attention on the fold-only qkv (this position's K and V
+written to the cache, then overwritten by the exact pass before the exact attention). Outputs identical (128 positions, PPL
+73.47170030217767). Two-tier 12/28 + birddog, 5 interleaved repeats, ms/token sorted: without o prediction 58.1 58.2 58.7 59.7
+60.4; with 56.3 58.6 58.7 58.9 59.4. Same median: the extra attention on the compute stream costs what the earlier o gather saves.
+Code removed (data `lakes/p7_glint/prims_20261119/bird_o/`). With this, every linear class that can be predicted from the fold is,
+and the remaining per-token time is the link carrying the plug bytes the landing needs.
