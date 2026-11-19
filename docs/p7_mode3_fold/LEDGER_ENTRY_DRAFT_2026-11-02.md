@@ -1,4 +1,4 @@
-# P7 results ledger entry (DRAFT for TD review, glint #22), updated 2026-11-03
+# P7 results ledger entry (DRAFT for TD review, glint #22), updated 2026-11-04
 
 Phi-4-mini-instruct, RTX 3060 sm_86, 2047 evaluation tokens (`artifacts/eval_tokens_2048.txt`, sha in `hf_meta.json`), HF BF16 sdpa oracle PPL 5.486957. KL is KL(BF16 CUDA anchor || arm) per token. Every number below is from a run on this machine in glint `main`; commands are the harness invocations named in each PR.
 
@@ -20,5 +20,12 @@ Phi-4-mini-instruct, RTX 3060 sm_86, 2047 evaluation tokens (`artifacts/eval_tok
 | Stage 0 question list (rules 0.5) | PR #72 | 144 items, list sha256 bf342e75..., reproducible; cal16k exclusion not applied (list not on disk) |
 | M4-LOSSY sweep (knob = residual plug bit width) | PR #73, amendment committed before data | weight RMSE 1.39e-5 / 3.24e-5 / 9.70e-5 for b=4/3/2; KL mean 1.240e-3 / 1.195e-3 / 1.144e-3 (non-monotone); ideal bytes 1.81e9 / 1.41e9 / 1.01e9 |
 | M4-LOSSLESS (Huffman over glint indices) | PR #73 | 258 streams, 0 round-trip failures, 1.044% smaller |
+| Fold only (true parent decode) | PR #80 (draft, not merged) | Phi-4-mini PPL 5.846849, top-1 1869/2047 (91.30%); under cuBLAS PPL 5.833352, 1864/2047, identical to the NF4 arm: the hole is exactly NF4 |
+| Hole resident, plug streamed per layer, `glint_pin_v1` | PR #80 (draft) | PPL 5.479566, top-1 2007/2047; logits byte-identical to resident; 1,610,612,736 plug bytes, total stall 0.15 ms (H-TILE ~135 s per forward, so not a speed result) |
+| VRAM budget (first N layers' plug resident) | PR #82 (draft) | all-streamed saves 1305 MiB (5298 -> 3993 MiB), logits identical at every N |
+| Demand map: plug selected per token by activation | specs #81, results #82 (drafts) | pre-registered rules: not supported at 64-channel blocks; channel granularity 10% of plug keeps top-1 95.55% (idealized bytes); hole-skip fails at >= 25%; per-layer errors add |
+| Plug fetch speed (K-major layout) | PR #82 (draft) | block fetch 10-11 GB/s; single channels ~7 GB/s zero-copy; 5% of a layer's plug 0.31-0.35 ms vs 4.35 ms whole |
+| Rollout (3 prompts x 16 greedy steps) | PR #82 (draft) | no activation-selected arm tracks the full model (matched prefix 6-7 of 16); fold only 1.7; act vs random not separable at this sample |
+| Qwen3-4B-Base Mojo INT8 / +res4 plug / +resolution / both | PRs #77, #83 (drafts) | top-1 97.90 / 98.09 / 98.19 / 98.29%; PPL within 0.07% of the oracle; no KL anchor; not the GLINT pin |
 
-Not claimed: Part A (H5-H9 hybrid fidelity; job 26 harness sources and captures are not on this machine, and its real-data run is held for Test Designer review), the per-layer metric e for M4, the equal-bytes comparison against a BF16 model of the same total size, any run on a model other than Phi-4-mini (Mode 2 equivalence also on DeepSeek-R1-Distill-Qwen-1.5B), the 100%-on-confident-positions check of the Gate 1 amendment.
+Not claimed: a decode (KV-cache) path and any per-step speed number; a GLINT forward on any model other than Phi-4-mini; the weight-residual resolution (#34) and the INT4 base (#70); a comparison against GPTQ/AWQ/HQQ/llama.cpp; an orchestrator loader for `glint_pin_v1`; Part A (H5-H9 hybrid fidelity; job 26 harness sources and captures are not on this machine, and its real-data run is held for Test Designer review), the per-layer metric e for M4, the equal-bytes comparison against a BF16 model of the same total size, any run on a model other than Phi-4-mini (Mode 2 equivalence also on DeepSeek-R1-Distill-Qwen-1.5B), the 100%-on-confident-positions check of the Gate 1 amendment.
