@@ -1144,3 +1144,18 @@ Landing rollouts on the production two-tier path (`FUSED=m`, new kernels, birddo
 Every cheaper neighbour fails on one set, and the failures sit on the same two positions that bind the full plug (A (7, 28),
 B (3, 7)): these are the active constraints of this landing. 12/28 is the cheapest tested configuration that clears both with
 delta = 0.25. A third prompt set would show whether other positions bind.
+
+#### Third prompt set C (2026-11-19)
+
+Set C: roll offset 32 (A = 0, B = 64; the 12 windows partly overlap A and B text, the evaluation text is 2048 tokens, but each
+prompt context is new). Reference: lean decoder at 100% plug with margins (`C_ref100m.log`); force file = its 384 tokens. Arms on
+the production kernels with birddog. Data `lakes/p7_glint/prims_20261119/setC/`.
+
+| arm | link MB/token | headroom gate (delta 0.25) | tie flips | rollout ms/token |
+|---|---|---|---|---|
+| full plug 23% | 371 | FAIL, 0.12 at (0, 1) | 10 | 59.6 |
+| full plug 25% | 403 | PASS | 9 | 60.9 |
+| two-tier 12/28 | 322 | PASS | 8 | 58.1 |
+
+Two-tier 12/28 passes on all three sets (A, B, C) with 0 decided flips and at least 0.25 logits of headroom at every decided
+position; the full plug at 23% fails all three and at 25% fails A.
