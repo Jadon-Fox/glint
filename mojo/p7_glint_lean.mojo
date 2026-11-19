@@ -18,7 +18,7 @@ from p7_glint_gemv_km import glint_gemv_km, gemv_km_combine, GTB, glint_gemv_km_
 from p7_decode_fast_kernels import rms_norm_block, logits_warp, ce_argmax_block, margin_block
 from p7_attention_split import attention_split_partial, attention_split_combine, NCH
 from p7_select_device import select_topk, transpose_scales, gather_rows_fix, apply_corr_ksc, combine_corr, KS, GB
-from p7_plug_planes import split_planes, apply_corr_ksc_planes, select_topk2, apply_corr_ksc_tier, gather_planes2, apply_corr_ksc_tier_x, combine_corr2, apply_corr_ksc_tier_v, apply_corr_ksc_r, apply_corr_ksc_tier_r, gather_planes_merge, apply_corr_ksc_tier_mr, select_rank_f
+from p7_plug_planes import split_planes, apply_corr_ksc_planes, select_topk2, apply_corr_ksc_tier, gather_planes2, apply_corr_ksc_tier_x, combine_corr2, apply_corr_ksc_tier_v, apply_corr_ksc_r, apply_corr_ksc_tier_r, gather_planes_merge, apply_corr_ksc_tier_mr, select_rank_f, add_vec
 
 comptime CTX = 2048
 comptime NT = CTX - 1
@@ -270,6 +270,14 @@ def main() raises:
     var gemv_u = Int(getenv("GLINT_GEMV_U", "0"))
     if gemv_u != 0 and gemv_u != 2 and gemv_u != 4 and gemv_u != 8:
         raise Error("GLINT_GEMV_U must be 0, 2, 4 or 8")
+    # GLINT_BIRD=1 (birddog look-ahead, full-plug ephemeral path): as soon as a linear's fold-only output exists, the next linear's
+    # input is predicted from it (gate+up from norm(x + o_fold), down from swiglu(gu_fold), next qkv from norm(x + down_fold); o is
+    # not predicted) and its selection and gather are queued on the link right behind the current gather. The exact selection then
+    # runs as before and the fix gather fetches only rows the prediction missed (flags carry the target linear's stamp). Corrections
+    # use the exact lists, so outputs are unchanged; wrong predictions cost link bytes only.
+    var bird = getenv("GLINT_BIRD", "0") == "1"
+    # GLINT_BIRD_X = predicted set size in percent of the exact set (default 100); larger trades wasted bytes for fewer misses.
+    var bird_x = Int(getenv("GLINT_BIRD_X", "100"))
     var corr_env = getenv("GLINT_CORR_R", "0")
     var corr_rc = List[Int]()
     var corr_parts = corr_env.split(",")
@@ -414,6 +422,7 @@ def main() raises:
 
     var k_embed = ctx.compile_function[embed_gather[ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
     var k_rope = ctx.compile_function[rope[ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
+    var k_add = ctx.compile_function[add_vec[ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
     var k_res = ctx.compile_function[residual_add[ImmUntrackedOrigin, MutUntrackedOrigin]]()
     var k_swi = ctx.compile_function[swiglu[ImmUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin]]()
     var k_kv = ctx.compile_function[kv_write[ImmUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin]]()
@@ -650,6 +659,14 @@ def main() raises:
     var part_buf2 = ctx.enqueue_create_buffer[DType.float32](KS * 16384 if fused_x or tier_cv >= 0 else 16)
     var part_g = ctx.enqueue_create_buffer[DType.float32](32 * 16384)
     var hbf16 = DeviceBuffer[DType.uint16](ctx, hbf.unsafe_ptr().unsafe_bitcast[UInt16](), H, owning=False)
+    var xp = ctx.enqueue_create_buffer[DType.float32](H)
+    var hbfp = ctx.enqueue_create_buffer[DType.bfloat16](H)
+    var actp = ctx.enqueue_create_buffer[DType.float32](INTER)
+    var actbp = ctx.enqueue_create_buffer[DType.bfloat16](INTER)
+    var hbfp16 = DeviceBuffer[DType.uint16](ctx, hbfp.unsafe_ptr().unsafe_bitcast[UInt16](), H, owning=False)
+    var actbp16 = DeviceBuffer[DType.uint16](ctx, actbp.unsafe_ptr().unsafe_bitcast[UInt16](), INTER, owning=False)
+    var idxP = ctx.enqueue_create_buffer[DType.int32](8192)
+    var cntP = ctx.enqueue_create_buffer[DType.int32](2)
     var attnb16 = DeviceBuffer[DType.uint16](ctx, attnb.unsafe_ptr().unsafe_bitcast[UInt16](), H, owning=False)
     var actb16 = DeviceBuffer[DType.uint16](ctx, actb.unsafe_ptr().unsafe_bitcast[UInt16](), INTER, owning=False)
     # Per linear class (qkv, o, gate+up, down): bf16 input, its raw-bits view for selection, fp32 output, K-split count.
@@ -683,9 +700,11 @@ def main() raises:
     var emb_done = ctx.create_event()
     var ev_in2 = List[type_of(emb_done)]()
     var ev_cd = List[type_of(emb_done)]()
+    var ev_bd = List[type_of(emb_done)]()
     for _ in range(LAYERS * 4):
         ev_in2.append(ctx.create_event())
         ev_cd.append(ctx.create_event())
+        ev_bd.append(ctx.create_event())
 
     # GLINT_ROLL_OFFSET: tokens added to each rollout prompt's start (64 gives 12 prompts disjoint from the default set).
     var roll_off = parse_uint(getenv("GLINT_ROLL_OFFSET", "0"), "GLINT_ROLL_OFFSET")
@@ -874,6 +893,26 @@ def main() raises:
                 else:
                     ks.enqueue_function(k_gkm, hk32[i], sk_v[i], t0b, xin_c[c], part_g, Int32(n), Int32(kd), Int32(splits_c[c]), grid_dim=(ceildiv(n // 8, GTB), splits_c[c]), block_dim=GTB)
                 ks.enqueue_function(k_gkc, part_g, yout_c[c], Int32(n), Int32(splits_c[c]), grid_dim=ceildiv(n, 128), block_dim=128)
+                if bird and tier2 == 0 and reuse == 0 and c >= 1 and (c < 3 or lr + 1 < LAYERS):
+                    var lt = lr + 1 if c == 3 else lr
+                    var ct2 = 0 if c == 3 else c + 1
+                    var jt = lt * 4 + ct2
+                    if nc[jt] > 0:
+                        if c == 1:
+                            ks.enqueue_function(k_add, x, proj, xp, Int32(H), grid_dim=ceildiv(H, 256), block_dim=256)
+                            ks.enqueue_function(k_normf, xp, postnorm_v[lr], hbfp, grid_dim=1, block_dim=256)
+                        elif c == 2:
+                            ks.enqueue_function(k_swi, gu, actp, actbp, grid_dim=ceildiv(INTER, 256), block_dim=256)
+                        else:
+                            ks.enqueue_function(k_add, x, down, xp, Int32(H), grid_dim=ceildiv(H, 256), block_dim=256)
+                            ks.enqueue_function(k_normf, xp, innorm_v[lr + 1], hbfp, grid_dim=1, block_dim=256)
+                        ks.record_event(ev_bd[jt])
+                        gs.enqueue_wait_for(ev_bd[jt])
+                        if sel_fast:
+                            gs.enqueue_function(k_self1, actbp16 if ct2 == 3 else hbfp16, idxP, cntP, idxP, cntP, dummy_log, Int32(0), Int32(0), Int32(kin[ct2]), Int32(min(kin[ct2], nc[jt] * bird_x // 100)), Int32(0), grid_dim=1, block_dim=1024)
+                        else:
+                            gs.enqueue_function(k_sel, actbp16 if ct2 == 3 else hbfp16, idxP, cntP, dummy_log, Int32(0), Int32(kin[ct2]), Int32(min(kin[ct2], nc[jt] * bird_x // 100)), Int32(0), Int32(0), grid_dim=1, block_dim=1024)
+                        gs.enqueue_function(k_gatx, plugk_w[jt], idxP, cntP, stg32[ct2], ovl_flags, Int32(nout[ct2] // 8), Int32(ct2 * INTER), Int32((stamp_base + lt) * 2 + 1000), Int32(0), grid_dim=gbk[ct2], block_dim=128)
                 if nc[i] > 0:
                     ks.enqueue_wait_for(ev_cd[i])
                     if abl_t != 4 and abl_t != 5:
