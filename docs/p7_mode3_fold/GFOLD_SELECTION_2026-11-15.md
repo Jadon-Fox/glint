@@ -1047,3 +1047,22 @@ comparison below is interleaved.
   share every arm lands with almost no headroom, so summation order decides that flip. Two-tier 12/28 `m` lands on both sets
   with 0 decided flips and at least 0.25 logits of headroom at every decided position (`e2e/roll_{A,B}_tm12.log`), more than the
   full plug at 23% (A 0.00, B 0.12), for 13% fewer link bytes and about 1 ms per token more than the improved full plug.
+
+#### Landing with margin (proposed, not locked)
+
+The operator's G-fold form elsewhere (`mercs-gfold-buying-vectors` README) lands at `x(T_land) >= Cost + delta`, and drops
+trajectories that reach the floor only on paper. Mapped here: the floor is "the reference token stays top-1 at a decided
+position"; delta is the arm's own margin there. A tie win (margin 0) holds only for one summation order, which is what mode `1`'s
+flip showed. Gate: `scripts/glint_attr_score.py headroom 25 REF ARM...` (delta = 0.25 logits, two bf16 logit steps; the measured
+order perturbation moved one margin by 0.125). Delta is the operator's to set; 0.25 is a proposal.
+
+| arm | link MB/token | set A | set B |
+|---|---|---|---|
+| full plug 23% | 371 | FAIL, tie at (7, 28) | FAIL, 0.12 at (3, 7) |
+| full plug 25% | 403 | FAIL, tie at (7, 28) | PASS |
+| two-tier 10/26 `x` | 290 | FAIL | FAIL |
+| two-tier 12/28 `m` | 322 | PASS, min 0.25 | PASS, min 0.25 |
+| two-tier 12/28 emulated (exact unfused order) | 322 | PASS, min 0.37 | PASS, min 0.25 |
+
+Two-tier 12/28 passes under both summation orders and beats the full plug at 25% on 20% fewer bytes: covering more channels
+coarsely closes the landing gap at (7, 28) where more exact bits on fewer channels do not.

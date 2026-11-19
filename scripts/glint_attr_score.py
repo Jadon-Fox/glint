@@ -4,7 +4,10 @@
   glint_attr_score.py score REF_MARGIN_LOG REF_ALT_LOG ARM_LOG...   T, D and conditional flip rates per arm
   glint_attr_score.py quick REF_MARGIN_LOG ARM_LOG...   same counts from the reference's stored margins alone: a flip is
       decided when the reference margin there exceeds 0.50 (any other token is then more than 0.50 below). Checked against
-      the full method on 307 attribution flips (2026-11-18): 0 disagreements."""
+      the full method on 307 attribution flips (2026-11-18): 0 disagreements.
+  glint_attr_score.py headroom DELTA_X100 REF_MARGIN_LOG ARM_LOG...   landing with margin (G-fold: land at floor + delta, not on
+      the floor): at every decided position the arm must keep the reference token with its own margin >= DELTA (logits x100).
+      Needs arm logs written with GLINT_MARGIN=1. Prints decided flips, positions under delta, min headroom; PASS or FAIL."""
 import re, sys
 
 def roll(path, key="MOJO_ROLL"):
@@ -23,6 +26,17 @@ if sys.argv[1] == "flips":
     ref = roll(sys.argv[2])
     seen = sorted({f for p in sys.argv[3:] for f in flips(ref, roll(p))})
     print("\n".join(" ".join(map(str, f)) for f in seen))
+elif sys.argv[1] == "headroom":
+    delta = int(sys.argv[2]); ref = roll(sys.argv[3]); rmarg = roll(sys.argv[3], "MOJO_MARGIN")
+    dec = [(k, i) for k in range(12) for i in range(32) if rmarg[k][i] > 50]
+    for p in sys.argv[4:]:
+        arm = roll(p); am = roll(p, "MOJO_MARGIN")
+        df = [x for x in dec if arm[x[0]][x[1]] != ref[x[0]][x[1]]]
+        kept = sorted((am[k][i], k, i) for k, i in dec if arm[k][i] == ref[k][i])
+        low = [(k, i, m) for m, k, i in kept if m < delta]
+        ok = not df and not low
+        print(f"{p.split('/')[-1]:24s} decided {len(dec)} dflips {len(df)} under_delta {len(low)} "
+              f"min_headroom_x100 {kept[0][0] if kept else 'n/a'} {'PASS' if ok else 'FAIL'} {df + low}")
 elif sys.argv[1] == "quick":
     ref = roll(sys.argv[2]); rmarg = roll(sys.argv[2], "MOJO_MARGIN")
     for p in sys.argv[3:]:
