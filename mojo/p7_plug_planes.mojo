@@ -688,3 +688,9 @@ def select_rank_f[
             cnt_w[unsafe_offset=1] = Int32(tht)
             cnt_t[unsafe_offset=0] = tt
             cnt_log[unsafe_offset=Int(slot_t)] = tt
+
+# GLINT_BIRD=1 helper: o = a + b (f32), for the predicted residual x + fold-only output.
+def add_vec[ao: ImmOrigin, bo: ImmOrigin, oo: MutOrigin](a: ImmPointer[Float32, ao], b: ImmPointer[Float32, bo], o: MutPointer[Float32, oo], n: Int32):
+    var i = global_idx.x
+    if i < Int(n):
+        o[unsafe_offset=i] = a[unsafe_offset=i] + b[unsafe_offset=i]

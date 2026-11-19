@@ -1085,3 +1085,21 @@ Data `lakes/p7_glint/prims_20261119/{gemv_u,e2e2,ovl}/`.
 - What is left on the critical path is serial by data dependence. Removing it needs the selection for linear i+1 before its
   exact input exists: a prediction (the fold-only input is the cheap look-ahead), which changes selections and must pass the
   landing gate.
+### Birddog look-ahead prefetch (2026-11-19)
+
+`GLINT_BIRD=1` (full-plug ephemeral path). The fold is the inferior model that looks ahead: once a linear's fold-only output
+exists, the next linear's input is predicted from it (gate+up from `norm(x + o_fold)`, down from `swiglu(gu_fold)`, the next
+layer's qkv from `norm(x + down_fold)`; o is not predicted, its input needs attention) and that selection and gather are queued
+on the link right behind the current gather. The exact selection still runs; the fix gather fetches only rows the prediction
+missed. Corrections use the exact lists, so outputs are unchanged (128 teacher-forced positions identical, PPL
+72.24476008256185). Data `lakes/p7_glint/prims_20261119/bird/`.
+
+- Full plug 23% with `GLINT_CORR_R=2,2,4,2 GLINT_SEL_FAST=1` (the build predates `GLINT_GEMV_U`; both arms ran the same build), 7 interleaved repeats, ms/token sorted: without 58.2 59.0 59.1 60.2 60.5 60.8 66.0
+  (median 60.2); with birddog 54.4 56.5 56.6 57.2 57.4 57.7 62.7 (median 57.2). About 3 ms (5%) faster.
+- Link work rises: gather kernel time 37.2 -> 46.9 ms/token (wrong predictions are fetched and then the misses). That puts the
+  prediction at roughly three quarters of the exact rows.
+- Null: widening the predicted set (`GLINT_BIRD_X`) costs more than the misses it saves: 100% 57.1 / 59.7 / 61.3, 115%
+  59.4 / 60.2 / 60.7, 130% 64.7 / 65.5 / 67.3. The link is the bottleneck, so wasted bytes are not free.
+- Not yet on the two-tier path: `gather_planes_merge` has no fetch flags, and a predicted wide-only row may need its LO plane
+  once the exact top set is known, so the flag must carry top membership. The layer stamps step by 2, so encoding it as
+  stamp + 2 would collide with the next layer; this needs its own flag array.
