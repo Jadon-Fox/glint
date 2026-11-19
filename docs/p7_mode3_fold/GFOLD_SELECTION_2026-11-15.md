@@ -1128,3 +1128,19 @@ written to the cache, then overwritten by the exact pass before the exact attent
 60.4; with 56.3 58.6 58.7 58.9 59.4. Same median: the extra attention on the compute stream costs what the earlier o gather saves.
 Code removed (data `lakes/p7_glint/prims_20261119/bird_o/`). With this, every linear class that can be predicted from the fold is,
 and the remaining per-token time is the link carrying the plug bytes the landing needs.
+
+#### Cheapest config that lands with margin (2026-11-19)
+
+Landing rollouts on the production two-tier path (`FUSED=m`, new kernels, birddog), gate `glint_attr_score.py headroom 25`. Data
+`lakes/p7_glint/prims_20261119/land_min/`.
+
+| config (top / wide %) | link MB/token | set A | set B |
+|---|---|---|---|
+| 11/27 | about 298 | PASS | FAIL, decided flip at (3, 7) |
+| 11/28 | 306 | FAIL, decided flip at (7, 28) | PASS |
+| 12/26 | 306 | PASS | FAIL, (1, 1), (4, 15) and 0.12 at (3, 7) |
+| 12/28 | 322 | PASS | PASS |
+
+Every cheaper neighbour fails on one set, and the failures sit on the same two positions that bind the full plug (A (7, 28),
+B (3, 7)): these are the active constraints of this landing. 12/28 is the cheapest tested configuration that clears both with
+delta = 0.25. A third prompt set would show whether other positions bind.
