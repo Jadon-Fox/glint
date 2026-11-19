@@ -3,9 +3,9 @@
 # (p7_int8_mma_gemm); embedding, RMSNorm, RoPE, attention, SwiGLU, residuals, tied-embedding logits and cross-entropy are
 # Mojo kernels with bf16 rounding points. Qwen3 differences handled here: separate q/k/v and gate/up projections, per-head
 # QK RMSNorm (q_norm/k_norm over head_dim) before RoPE, full-width RoPE with theta 1e6, GQA 32:8, no attention scale
-# factor, RMS eps 1e-6, vocab 151936 tied to the embedding, three BF16 shards. INT8 arm only (no plug, no resolution yet).
-# Run: mojo run -I mojo mojo/q3_forward.mojo PIN.safetensors MODEL_DIR ARTIFACTS_DIR
-from std.math import ceildiv, exp, log, rsqrt, cos, sin, pow
+# factor, RMS eps 1e-6, vocab 151936 tied to the embedding, three BF16 shards. Arms: INT8 base; optional res4 plug (weight residual, tools/plug_encode.c) and optional resolution (activation residual second pass), as in p7_forward.mojo.
+# Run: mojo run -I mojo mojo/q3_forward.mojo PIN.safetensors MODEL_DIR ARTIFACTS_DIR [PLUG.safetensors|none] [resolve]
+from std.math import ceildiv, exp, log, rsqrt, cos, sin, pow, round
 from std.sys import argv
 from std.time import perf_counter_ns
 from std.gpu import global_idx, thread_idx, block_idx
@@ -217,6 +217,38 @@ def ce_argmax[
     loss[unsafe_offset=r] = log(sum) + mx - bf16r(lg[unsafe_offset=r * V + t])
     top1[unsafe_offset=r] = Int32(mi)
 
+def quant_resid[
+    xo: ImmOrigin, qo: ImmOrigin, so: ImmOrigin, ro: MutOrigin, sro: MutOrigin
+](
+    x: ImmPointer[BFloat16, xo],
+    xq: ImmPointer[Int8, qo],
+    sx: ImmPointer[Float32, so],
+    rq: MutPointer[Int8, ro],
+    sr: MutPointer[Float32, sro],
+    nblocks: Int32,
+):
+    var b = global_idx.x
+    if b >= Int(nblocks):
+        return
+    var base = b * 64
+    var scale = sx[unsafe_offset=b]
+    var am = Float32(0)
+    for i in range(64):
+        var r = x[unsafe_offset=base + i].cast[DType.float32]() - Float32(xq[unsafe_offset=base + i]) * scale
+        var a = abs(r)
+        if a > am:
+            am = a
+    var s = am / Float32(127) if am > Float32(0) else Float32(1)
+    sr[unsafe_offset=b] = s
+    for i in range(64):
+        var r = x[unsafe_offset=base + i].cast[DType.float32]() - Float32(xq[unsafe_offset=base + i]) * scale
+        var c = round(r / s)
+        if c > Float32(127):
+            c = Float32(127)
+        if c < Float32(-127):
+            c = Float32(-127)
+        rq[unsafe_offset=base + i] = Int8(Int(c))
+
 def read_range(path: String, begin: Int, n: Int) raises -> List[UInt8]:
     var f = open(path, "r")
     _ = f.seek(begin)
@@ -319,6 +351,20 @@ def main() raises:
             ls.append(load_u8(ctx, pin_path, pin_h, nm + ".int8_scale"))
     print("weights loaded in", Float64(perf_counter_ns() - t_load) / 1e9, "s")
     print("Q3_FORWARD_LOADED")
+    var use_plug = len(args) > 4 and String(args[4]) != "none"
+    var resolve = len(args) > 5 and String(args[5]) == "resolve"
+    var plq = List[type_of(ctx.enqueue_create_buffer[DType.uint8](1))]()
+    var pls = List[type_of(ctx.enqueue_create_buffer[DType.uint8](1))]()
+    if use_plug:
+        var plug_path = String(args[4])
+        var plug_h = read_header(plug_path)
+        for l in range(LAYERS):
+            for j in range(NLIN):
+                var nm = "model.layers." + String(l) + "." + names[j] + ".weight"
+                plq.append(load_u8(ctx, plug_path, plug_h, nm + ".plug_q4"))
+                pls.append(load_u8(ctx, plug_path, plug_h, nm + ".plug_scale"))
+        print("plug loaded:", len(plq), "linears")
+    print("plug", use_plug, "resolve", resolve)
 
     var emb = DeviceBuffer[DType.bfloat16](ctx, emb_u8.unsafe_ptr().unsafe_bitcast[BFloat16](), V * H, owning=False)
     var fnorm = DeviceBuffer[DType.bfloat16](ctx, fnorm_u8.unsafe_ptr().unsafe_bitcast[BFloat16](), H, owning=False)
@@ -352,6 +398,13 @@ def main() raises:
         for j in range(NLIN):
             wq_v.append(DeviceBuffer[DType.int8](ctx, lq[l * NLIN + j].unsafe_ptr().unsafe_bitcast[Int8](), nout[j] * kin[j], owning=False))
             sw_v.append(DeviceBuffer[DType.float32](ctx, ls[l * NLIN + j].unsafe_ptr().unsafe_bitcast[Float32](), nout[j] * kin[j] // 64, owning=False))
+
+    var pls_v = List[DeviceBuffer[DType.float32]]()
+    if use_plug:
+        for i in range(LAYERS * NLIN):
+            pls_v.append(DeviceBuffer[DType.float32](ctx, pls[i].unsafe_ptr().unsafe_bitcast[Float32](), nout[i % NLIN] * kin[i % NLIN] // 64, owning=False))
+    var rq = ctx.enqueue_create_buffer[DType.int8](T * INTER)
+    var sr = ctx.enqueue_create_buffer[DType.float32](T * INTER // 64)
 
     # RoPE tables: host double precision, rounded to bf16 (HF casts cos/sin to the model dtype)
     var cth = ctx.enqueue_create_host_buffer[DType.float32](T * (HD // 2))
@@ -411,6 +464,8 @@ def main() raises:
     var k_swi = ctx.compile_function[swiglu[ImmUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin]]()
     var k_quant = ctx.compile_function[quant_act[ImmUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin]]()
     var k_gemm = ctx.compile_function[int8_mma_gemm[False, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
+    var k_gemm_p = ctx.compile_function[int8_mma_gemm[True, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
+    var k_qres = ctx.compile_function[quant_resid[ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin]]()
     var k_lg = ctx.compile_function[logits_gemm[ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
     var k_ce = ctx.compile_function[ce_argmax[ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin]]()
 
@@ -421,32 +476,110 @@ def main() raises:
         var b = l * NLIN
         ctx.enqueue_function(k_norm, x, innorm_v[l], hbf, grid_dim=ceildiv(T, 64), block_dim=64)
         ctx.enqueue_function(k_quant, hbf, xq, sx, Int32(T * (H // 64)), grid_dim=ceildiv(T * (H // 64), 64), block_dim=64)
-        ctx.enqueue_function(k_gemm, xq, sx, wq_v[b + 0], sw_v[b + 0], dummy_p, dummy_s, qb, Int32(T), Int32(QD), Int32(H), Int32(0),
-                             grid_dim=(ceildiv(QD, 64), ceildiv(T, 64)), block_dim=128)
-        ctx.enqueue_function(k_gemm, xq, sx, wq_v[b + 1], sw_v[b + 1], dummy_p, dummy_s, kb, Int32(T), Int32(KD), Int32(H), Int32(0),
-                             grid_dim=(ceildiv(KD, 64), ceildiv(T, 64)), block_dim=128)
-        ctx.enqueue_function(k_gemm, xq, sx, wq_v[b + 2], sw_v[b + 2], dummy_p, dummy_s, vb, Int32(T), Int32(KD), Int32(H), Int32(0),
-                             grid_dim=(ceildiv(KD, 64), ceildiv(T, 64)), block_dim=128)
+        if use_plug:
+            ctx.enqueue_function(k_gemm_p, xq, sx, wq_v[b + 0], sw_v[b + 0], plq[b + 0], pls_v[b + 0], qb, Int32(T), Int32(QD), Int32(H), Int32(0),
+                                 grid_dim=(ceildiv(QD, 64), ceildiv(T, 64)), block_dim=128)
+        else:
+            ctx.enqueue_function(k_gemm, xq, sx, wq_v[b + 0], sw_v[b + 0], dummy_p, dummy_s, qb, Int32(T), Int32(QD), Int32(H), Int32(0),
+                                 grid_dim=(ceildiv(QD, 64), ceildiv(T, 64)), block_dim=128)
+        if use_plug:
+            ctx.enqueue_function(k_gemm_p, xq, sx, wq_v[b + 1], sw_v[b + 1], plq[b + 1], pls_v[b + 1], kb, Int32(T), Int32(KD), Int32(H), Int32(0),
+                                 grid_dim=(ceildiv(KD, 64), ceildiv(T, 64)), block_dim=128)
+        else:
+            ctx.enqueue_function(k_gemm, xq, sx, wq_v[b + 1], sw_v[b + 1], dummy_p, dummy_s, kb, Int32(T), Int32(KD), Int32(H), Int32(0),
+                                 grid_dim=(ceildiv(KD, 64), ceildiv(T, 64)), block_dim=128)
+        if use_plug:
+            ctx.enqueue_function(k_gemm_p, xq, sx, wq_v[b + 2], sw_v[b + 2], plq[b + 2], pls_v[b + 2], vb, Int32(T), Int32(KD), Int32(H), Int32(0),
+                                 grid_dim=(ceildiv(KD, 64), ceildiv(T, 64)), block_dim=128)
+        else:
+            ctx.enqueue_function(k_gemm, xq, sx, wq_v[b + 2], sw_v[b + 2], dummy_p, dummy_s, vb, Int32(T), Int32(KD), Int32(H), Int32(0),
+                                 grid_dim=(ceildiv(KD, 64), ceildiv(T, 64)), block_dim=128)
+        if resolve:
+            ctx.enqueue_function(k_qres, hbf, xq, sx, rq, sr, Int32(T * (H // 64)), grid_dim=ceildiv(T * (H // 64), 64), block_dim=64)
+            if use_plug:
+                ctx.enqueue_function(k_gemm_p, rq, sr, wq_v[b + 0], sw_v[b + 0], plq[b + 0], pls_v[b + 0], qb, Int32(T), Int32(QD), Int32(H), Int32(1),
+                                     grid_dim=(ceildiv(QD, 64), ceildiv(T, 64)), block_dim=128)
+            else:
+                ctx.enqueue_function(k_gemm, rq, sr, wq_v[b + 0], sw_v[b + 0], dummy_p, dummy_s, qb, Int32(T), Int32(QD), Int32(H), Int32(1),
+                                     grid_dim=(ceildiv(QD, 64), ceildiv(T, 64)), block_dim=128)
+            if use_plug:
+                ctx.enqueue_function(k_gemm_p, rq, sr, wq_v[b + 1], sw_v[b + 1], plq[b + 1], pls_v[b + 1], kb, Int32(T), Int32(KD), Int32(H), Int32(1),
+                                     grid_dim=(ceildiv(KD, 64), ceildiv(T, 64)), block_dim=128)
+            else:
+                ctx.enqueue_function(k_gemm, rq, sr, wq_v[b + 1], sw_v[b + 1], dummy_p, dummy_s, kb, Int32(T), Int32(KD), Int32(H), Int32(1),
+                                     grid_dim=(ceildiv(KD, 64), ceildiv(T, 64)), block_dim=128)
+            if use_plug:
+                ctx.enqueue_function(k_gemm_p, rq, sr, wq_v[b + 2], sw_v[b + 2], plq[b + 2], pls_v[b + 2], vb, Int32(T), Int32(KD), Int32(H), Int32(1),
+                                     grid_dim=(ceildiv(KD, 64), ceildiv(T, 64)), block_dim=128)
+            else:
+                ctx.enqueue_function(k_gemm, rq, sr, wq_v[b + 2], sw_v[b + 2], dummy_p, dummy_s, vb, Int32(T), Int32(KD), Int32(H), Int32(1),
+                                     grid_dim=(ceildiv(KD, 64), ceildiv(T, 64)), block_dim=128)
         ctx.enqueue_function(k_prep, qb, kb, vb, qn_v[l], kn_v[l], qkv, grid_dim=ceildiv(T * NH, 64), block_dim=64)
         ctx.enqueue_function(k_rope, qkv, ct, st, rp, grid_dim=ceildiv(T * QKV, 256), block_dim=256)
         ctx.enqueue_function(k_attn, rp, attn, attnb, grid_dim=(T, NQ), block_dim=HD)
         # o proj
         ctx.enqueue_function(k_quant, attnb, xq, sx, Int32(T * (QD // 64)), grid_dim=ceildiv(T * (QD // 64), 64), block_dim=64)
-        ctx.enqueue_function(k_gemm, xq, sx, wq_v[b + 3], sw_v[b + 3], dummy_p, dummy_s, proj, Int32(T), Int32(H), Int32(QD), Int32(0),
-                             grid_dim=(ceildiv(H, 64), ceildiv(T, 64)), block_dim=128)
+        if use_plug:
+            ctx.enqueue_function(k_gemm_p, xq, sx, wq_v[b + 3], sw_v[b + 3], plq[b + 3], pls_v[b + 3], proj, Int32(T), Int32(H), Int32(QD), Int32(0),
+                                 grid_dim=(ceildiv(H, 64), ceildiv(T, 64)), block_dim=128)
+        else:
+            ctx.enqueue_function(k_gemm, xq, sx, wq_v[b + 3], sw_v[b + 3], dummy_p, dummy_s, proj, Int32(T), Int32(H), Int32(QD), Int32(0),
+                                 grid_dim=(ceildiv(H, 64), ceildiv(T, 64)), block_dim=128)
+        if resolve:
+            ctx.enqueue_function(k_qres, attnb, xq, sx, rq, sr, Int32(T * (QD // 64)), grid_dim=ceildiv(T * (QD // 64), 64), block_dim=64)
+            if use_plug:
+                ctx.enqueue_function(k_gemm_p, rq, sr, wq_v[b + 3], sw_v[b + 3], plq[b + 3], pls_v[b + 3], proj, Int32(T), Int32(H), Int32(QD), Int32(1),
+                                     grid_dim=(ceildiv(H, 64), ceildiv(T, 64)), block_dim=128)
+            else:
+                ctx.enqueue_function(k_gemm, rq, sr, wq_v[b + 3], sw_v[b + 3], dummy_p, dummy_s, proj, Int32(T), Int32(H), Int32(QD), Int32(1),
+                                     grid_dim=(ceildiv(H, 64), ceildiv(T, 64)), block_dim=128)
         ctx.enqueue_function(k_res, proj, x, grid_dim=ceildiv(T * H, 256), block_dim=256)
         ctx.enqueue_function(k_norm, x, postnorm_v[l], hbf, grid_dim=ceildiv(T, 64), block_dim=64)
         # gate, up
         ctx.enqueue_function(k_quant, hbf, xq, sx, Int32(T * (H // 64)), grid_dim=ceildiv(T * (H // 64), 64), block_dim=64)
-        ctx.enqueue_function(k_gemm, xq, sx, wq_v[b + 4], sw_v[b + 4], dummy_p, dummy_s, gb, Int32(T), Int32(INTER), Int32(H), Int32(0),
-                             grid_dim=(ceildiv(INTER, 64), ceildiv(T, 64)), block_dim=128)
-        ctx.enqueue_function(k_gemm, xq, sx, wq_v[b + 5], sw_v[b + 5], dummy_p, dummy_s, ub, Int32(T), Int32(INTER), Int32(H), Int32(0),
-                             grid_dim=(ceildiv(INTER, 64), ceildiv(T, 64)), block_dim=128)
+        if use_plug:
+            ctx.enqueue_function(k_gemm_p, xq, sx, wq_v[b + 4], sw_v[b + 4], plq[b + 4], pls_v[b + 4], gb, Int32(T), Int32(INTER), Int32(H), Int32(0),
+                                 grid_dim=(ceildiv(INTER, 64), ceildiv(T, 64)), block_dim=128)
+        else:
+            ctx.enqueue_function(k_gemm, xq, sx, wq_v[b + 4], sw_v[b + 4], dummy_p, dummy_s, gb, Int32(T), Int32(INTER), Int32(H), Int32(0),
+                                 grid_dim=(ceildiv(INTER, 64), ceildiv(T, 64)), block_dim=128)
+        if use_plug:
+            ctx.enqueue_function(k_gemm_p, xq, sx, wq_v[b + 5], sw_v[b + 5], plq[b + 5], pls_v[b + 5], ub, Int32(T), Int32(INTER), Int32(H), Int32(0),
+                                 grid_dim=(ceildiv(INTER, 64), ceildiv(T, 64)), block_dim=128)
+        else:
+            ctx.enqueue_function(k_gemm, xq, sx, wq_v[b + 5], sw_v[b + 5], dummy_p, dummy_s, ub, Int32(T), Int32(INTER), Int32(H), Int32(0),
+                                 grid_dim=(ceildiv(INTER, 64), ceildiv(T, 64)), block_dim=128)
+        if resolve:
+            ctx.enqueue_function(k_qres, hbf, xq, sx, rq, sr, Int32(T * (H // 64)), grid_dim=ceildiv(T * (H // 64), 64), block_dim=64)
+            if use_plug:
+                ctx.enqueue_function(k_gemm_p, rq, sr, wq_v[b + 4], sw_v[b + 4], plq[b + 4], pls_v[b + 4], gb, Int32(T), Int32(INTER), Int32(H), Int32(1),
+                                     grid_dim=(ceildiv(INTER, 64), ceildiv(T, 64)), block_dim=128)
+            else:
+                ctx.enqueue_function(k_gemm, rq, sr, wq_v[b + 4], sw_v[b + 4], dummy_p, dummy_s, gb, Int32(T), Int32(INTER), Int32(H), Int32(1),
+                                     grid_dim=(ceildiv(INTER, 64), ceildiv(T, 64)), block_dim=128)
+            if use_plug:
+                ctx.enqueue_function(k_gemm_p, rq, sr, wq_v[b + 5], sw_v[b + 5], plq[b + 5], pls_v[b + 5], ub, Int32(T), Int32(INTER), Int32(H), Int32(1),
+                                     grid_dim=(ceildiv(INTER, 64), ceildiv(T, 64)), block_dim=128)
+            else:
+                ctx.enqueue_function(k_gemm, rq, sr, wq_v[b + 5], sw_v[b + 5], dummy_p, dummy_s, ub, Int32(T), Int32(INTER), Int32(H), Int32(1),
+                                     grid_dim=(ceildiv(INTER, 64), ceildiv(T, 64)), block_dim=128)
         ctx.enqueue_function(k_swi, gb, ub, act, actb, grid_dim=ceildiv(T * INTER, 256), block_dim=256)
         # down
         ctx.enqueue_function(k_quant, actb, xq, sx, Int32(T * (INTER // 64)), grid_dim=ceildiv(T * (INTER // 64), 64), block_dim=64)
-        ctx.enqueue_function(k_gemm, xq, sx, wq_v[b + 6], sw_v[b + 6], dummy_p, dummy_s, down, Int32(T), Int32(H), Int32(INTER), Int32(0),
-                             grid_dim=(ceildiv(H, 64), ceildiv(T, 64)), block_dim=128)
+        if use_plug:
+            ctx.enqueue_function(k_gemm_p, xq, sx, wq_v[b + 6], sw_v[b + 6], plq[b + 6], pls_v[b + 6], down, Int32(T), Int32(H), Int32(INTER), Int32(0),
+                                 grid_dim=(ceildiv(H, 64), ceildiv(T, 64)), block_dim=128)
+        else:
+            ctx.enqueue_function(k_gemm, xq, sx, wq_v[b + 6], sw_v[b + 6], dummy_p, dummy_s, down, Int32(T), Int32(H), Int32(INTER), Int32(0),
+                                 grid_dim=(ceildiv(H, 64), ceildiv(T, 64)), block_dim=128)
+        if resolve:
+            ctx.enqueue_function(k_qres, actb, xq, sx, rq, sr, Int32(T * (INTER // 64)), grid_dim=ceildiv(T * (INTER // 64), 64), block_dim=64)
+            if use_plug:
+                ctx.enqueue_function(k_gemm_p, rq, sr, wq_v[b + 6], sw_v[b + 6], plq[b + 6], pls_v[b + 6], down, Int32(T), Int32(H), Int32(INTER), Int32(1),
+                                     grid_dim=(ceildiv(H, 64), ceildiv(T, 64)), block_dim=128)
+            else:
+                ctx.enqueue_function(k_gemm, rq, sr, wq_v[b + 6], sw_v[b + 6], dummy_p, dummy_s, down, Int32(T), Int32(H), Int32(INTER), Int32(1),
+                                     grid_dim=(ceildiv(H, 64), ceildiv(T, 64)), block_dim=128)
         ctx.enqueue_function(k_res, down, x, grid_dim=ceildiv(T * H, 256), block_dim=256)
     ctx.enqueue_function(k_norm, x, fnorm, hbf, grid_dim=ceildiv(T, 64), block_dim=64)
     ctx.synchronize()
@@ -486,5 +619,6 @@ def main() raises:
     print("Q3_FORWARD_DONE")
     # the typed views above are non-owning: keep the backing buffers alive until here
     _ = emb_u8.unsafe_ptr()
+    _ = len(plq) + len(pls) + len(pls_v)
     _ = fnorm_u8.unsafe_ptr()
     _ = len(in_norm) + len(post_norm) + len(qn_u8) + len(kn_u8) + len(lq) + len(ls)
