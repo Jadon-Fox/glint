@@ -1,0 +1,4 @@
+quant	mean_KLD_no_imatrix	mean_KLD_imatrix	relative_change	same_top_no_imatrix	same_top_imatrix	PPL_ratio_imatrix
+Q4_0	0.048419	0.025748	-46.8%	93.060	95.308	1.008322
+IQ4_NL	0.026880	0.018800	-30.1%	95.699	95.601	1.011578
+Q4_K_M	0.020894	0.018981	-9.2%	95.797	95.894	1.016269
