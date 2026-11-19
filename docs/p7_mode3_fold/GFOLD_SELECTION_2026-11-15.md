@@ -1009,3 +1009,41 @@ membership by key threshold (summation order changes).
   byte saving), selection 5.7 / 8.6, correction 7.1 / 14.5. With corrections off (timing only) mode 1 beats normal
   (47.9 vs 50.8), so the remaining gap is the plane correction, about 1.7x the per-channel cost of the normal one; cause
   not found (a branch-free variant gave the same time).
+
+### Two-tier correction cost found and removed (2026-11-19)
+
+Branch `perf/glint-tier2-corr`, kernels in `mojo/p7_plug_planes.mojo`. Data `lakes/p7_glint/prims_20261119/`
+(`corr_var/nsys2/` kernel traces, `e2e/` end-to-end and landing). Nsight Compute could not read counters (the driver restricts
+GPU performance counters to admin users; a host setting left to the operator), so costs come from Nsight Systems kernel
+durations. The desktop shares this GPU (about 39% utilization with no GLINT process), so whole-token times are noisy and every
+comparison below is interleaved.
+
+- **Cause.** Probes of the per-row tier correction, each run beside the exact kernel so selections stay identical (an
+  ablation that changes values changes the selected sets and invalidates the timing; the first probe round did this and was
+  discarded): base loads 5.32 ms/token, + table read 6.17, + HI-plane read without table 9.15, HI + table 10.96, full 14.05.
+  The 2-bit plane reads in VRAM were the cost, not the tables (a combined table and shared-memory tables both changed nothing).
+- **Fix.** The planes exist to save link bytes. `GLINT_TIER2_FUSED=m`: the gather pulls the same plane rows and writes each
+  channel's row into the 4-bit stage slot as `(HI << 2) | LO` (LO = 0 for wide-only channels); the correction reads it like the
+  full-plug kernel and picks `d_pre` or `d_top = d_pre + d_dif` per channel. Bit-identical to mode `1`.
+- **Row blocking** (`GLINT_CORR_R`, per class qkv,o,gate+up,down): one thread owns R rows with vector loads and shared-memory
+  tables; best 2,2,4,2. **Fast selection** (`GLINT_SEL_FAST=1`): keys in registers, both counts in one packed int, warp-shuffle
+  reduction, one barrier per bisection round. Both are bit-identical (position lines and PPL identical) and apply to the full
+  plug too.
+- Kernel totals per token (32 steps): full plug 23% gather / selection / correction 37.4 / 5.7 / 5.3 with the new kernels
+  (40.3 / 6.4 / 7.5 before); two-tier 10/26 `m` 32.3 / 4.5 / 8.8 (31.6 / 8.6 / 14.4 for mode `1`).
+
+| arm, teacher-forced 128, 5 interleaved repeats | ms/token min / median / max | link MB per token |
+|---|---|---|
+| full plug 23%, old kernels | 59.4 / 61.0 / 62.6 | 371 |
+| full plug 23%, new kernels (identical outputs) | 57.1 / 59.3 / 62.8 | 371 |
+| two-tier 10/26 `x` (exact unfused arithmetic) | 66.0 / 66.3 / 70.7 | 290 |
+| two-tier 10/26 `m` | 54.9 / 58.7 / 66.1 | 290 |
+| two-tier 12/28 `m` | 59.4 / 60.4 / 61.8 | 322 |
+
+- Two-tier is no longer slower: 10/26 `m` matches the improved full plug (median 0.6 ms faster, within the spread) and beats
+  the old full-plug path by 2.3 ms. It is not clearly faster; per-token time stays dominated by the link-bound gather.
+- **Landing headroom.** Mode `1`'s decided flip (set B (3, 7)) sits where the full plug at 23% also keeps the reference token by
+  only 0.12 logits; on set A (7, 28) the full plug at 23% and 25% and every two-tier config win only on an exact tie. At minimum
+  share every arm lands with almost no headroom, so summation order decides that flip. Two-tier 12/28 `m` lands on both sets
+  with 0 decided flips and at least 0.25 logits of headroom at every decided position (`e2e/roll_{A,B}_tm12.log`), more than the
+  full plug at 23% (A 0.00, B 0.12), for 13% fewer link bytes and about 1 ms per token more than the improved full plug.
