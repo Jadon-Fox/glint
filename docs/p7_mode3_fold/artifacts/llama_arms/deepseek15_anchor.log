@@ -1,0 +1,15 @@
+config: H=1536 I=8960 L=28 NQ=12 NKV=2 HD=128 V=151936 eps=1e-06 theta=10000 qknorm=0 bias=1 tie=0
+arms: mode=bf16 oracle PPL 10.832062
+Weights uploaded (BF16 anchor).
+Starting forward pass over 28 layers...
+
+=== bf16 ===
+Forward Pass Time:      4.533 s
+Mean Cross Entropy:     2.381769
+Measured Perplexity:    10.824034
+HuggingFace Oracle PPL: 10.832062
+PPL Delta vs Oracle:    0.0741 %
+Top-1 Matches:          2022 / 2047
+Top-1 Agreement:        98.78 %
+VERDICT: REPORT ONLY (bf16)
+rc=0
