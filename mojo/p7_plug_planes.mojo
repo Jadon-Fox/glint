@@ -694,3 +694,61 @@ def add_vec[ao: ImmOrigin, bo: ImmOrigin, oo: MutOrigin](a: ImmPointer[Float32, 
     var i = global_idx.x
     if i < Int(n):
         o[unsafe_offset=i] = a[unsafe_offset=i] + b[unsafe_offset=i]
+
+# GLINT_BIRD=1 on GLINT_TIER2_FUSED=m: gather_planes_merge with fetch stamps, so a predicted gather and the exact gather of the same
+# linear share the staging slot. hflags[off + c] marks the HI row fetched at stamp, tflags[off + c] the LO row. A wide channel is
+# fetched when its HI row is not from this linear (hflags < stamp) or when it is a top channel and its LO row is not (tflags < stamp);
+# a fetch writes both planes when top, HI with LO = 0 otherwise. Stale LO bits on a wide-only channel are harmless: d_pre holds one
+# value per prefix group, so the LO bits do not change the lookup. Persistent grid of GB blocks, block_dim 128.
+def gather_planes_merge_f[
+    ho: ImmOrigin, lo: ImmOrigin, ko: ImmOrigin, io: ImmOrigin, co: ImmOrigin, so: MutOrigin, fo: MutOrigin, to: MutOrigin
+](
+    hi_p: ImmPointer[UInt32, ho],
+    lo_p: ImmPointer[UInt32, lo],
+    x16: ImmPointer[UInt16, ko],
+    idx: ImmPointer[Int32, io],
+    cnt: ImmPointer[Int32, co],
+    stage: MutPointer[UInt32, so],
+    hflags: MutPointer[Int32, fo],
+    tflags: MutPointer[Int32, to],
+    rowwords: Int32, off: Int32, stamp: Int32,
+):
+    var rw = Int(rowwords)
+    var n = Int(cnt[unsafe_offset=0])
+    var tht = Int(cnt[unsafe_offset=1])
+    var tid = Int(thread_idx.x)
+    var need = stack_allocation[1, Int32, address_space=AddressSpace.SHARED]()
+    for i in range(Int(block_idx.x), n, Int(grid_dim.x)):
+        var c = Int(idx[unsafe_offset=i])
+        var top = (Int(x16[unsafe_offset=c]) & 32767) >= tht
+        if tid == 0:
+            var fh = hflags[unsafe_offset=Int(off) + c]
+            var ft = tflags[unsafe_offset=Int(off) + c]
+            var nd = fh < stamp or (top and ft < stamp)
+            need[unsafe_offset=0] = 1 if nd else 0
+            if nd:
+                hflags[unsafe_offset=Int(off) + c] = stamp + 1
+                if top:
+                    tflags[unsafe_offset=Int(off) + c] = stamp + 1
+        barrier()
+        if need[unsafe_offset=0] != 0:
+            for w4 in range(tid, rw // 4, 128):
+                var hv = hi_p.unsafe_offset(c * rw + 4 * w4).unsafe_load[width=4, alignment=16]()
+                var lv = SIMD[DType.uint32, 4](0)
+                if top:
+                    lv = lo_p.unsafe_offset(c * rw + 4 * w4).unsafe_load[width=4, alignment=16]()
+                var o = SIMD[DType.uint32, 8](0)
+                comptime for q in range(4):
+                    var a = UInt32(0)
+                    var b = UInt32(0)
+                    comptime for k in range(16):
+                        var nib = (((hv[q] >> UInt32(2 * k)) & UInt32(3)) << UInt32(2)) | ((lv[q] >> UInt32(2 * k)) & UInt32(3))
+                        comptime if k < 8:
+                            a |= nib << UInt32(4 * k)
+                        else:
+                            b |= nib << UInt32(4 * (k - 8))
+                    o[2 * q] = a
+                    o[2 * q + 1] = b
+                stage.unsafe_offset(c * 2 * rw + 8 * w4).unsafe_store[alignment=16](o.slice[4, offset=0]())
+                stage.unsafe_offset(c * 2 * rw + 8 * w4 + 4).unsafe_store[alignment=16](o.slice[4, offset=4]())
+        barrier()
