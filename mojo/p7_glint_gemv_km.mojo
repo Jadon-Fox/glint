@@ -92,3 +92,51 @@ def gemv_km_combine[
     for s in range(1, Int(ksg)):
         acc = acc + part[unsafe_offset=s * Int(n) + r]
     y[unsafe_offset=r] = acc
+
+# GLINT_GEMV_U = U: glint_gemv_km with the hole words of U consecutive channels loaded before any is used, so each thread keeps U
+# loads in flight instead of one. Accumulation order per row is unchanged, so outputs equal glint_gemv_km bit for bit. U divides 64.
+def glint_gemv_km_u[
+    U: Int, ho: ImmOrigin, so: ImmOrigin, to: ImmOrigin, xo: ImmOrigin, po: MutOrigin
+](
+    hole_k: ImmPointer[UInt32, ho],
+    scales_k: ImmPointer[Float32, so],
+    cells: ImmPointer[Float32, to],
+    x: ImmPointer[BFloat16, xo],
+    part: MutPointer[Float32, po],
+    n: Int32, kdim: Int32, ksg: Int32,
+):
+    var tid = Int(thread_idx.x)
+    var lane = tid & 31
+    var nn = Int(n)
+    var nw = nn // 8
+    var w = Int(block_idx.x) * GTB + tid
+    var kslice = Int(kdim) // Int(ksg)
+    var s = Int(block_idx.y)
+    var c0 = s * kslice
+    var tabr = stack_allocation[512, Float32, address_space=AddressSpace.SHARED]()
+    var xs = stack_allocation[KSL_MAX, Float32, address_space=AddressSpace.SHARED]()
+    for i in range(tid, 512, GTB):
+        tabr[unsafe_offset=i] = cells[unsafe_offset=(i // 32) * 16]
+    for i in range(tid, kslice, GTB):
+        xs[unsafe_offset=i] = x[unsafe_offset=c0 + i].cast[DType.float32]()
+    barrier()
+    if w >= nw:
+        return
+    var a = SIMD[DType.float32, 8](0)
+    for cb in range(c0 // 64, (c0 + kslice) // 64):
+        var sb = cb * nn + 8 * w
+        var sc = SIMD[DType.float32, 8](0)
+        comptime for j in range(8):
+            sc[j] = scales_k[unsafe_offset=sb + j]
+        for cq in range(0, 64, U):
+            var c = cb * 64 + cq
+            var wv = SIMD[DType.uint32, U](0)
+            comptime for u in range(U):
+                wv[u] = hole_k[unsafe_offset=(c + u) * nw + w]
+            comptime for u in range(U):
+                var xv = xs[unsafe_offset=c + u - c0]
+                comptime for j in range(8):
+                    a[j] += (tabr[unsafe_offset=Int((wv[u] >> UInt32(4 * j)) & UInt32(15)) * 32 + lane] * sc[j]) * xv
+    var ob = s * nn + 8 * w
+    comptime for j in range(8):
+        part[unsafe_offset=ob + j] = a[j]

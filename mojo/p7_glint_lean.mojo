@@ -14,7 +14,7 @@ from std.gpu import global_idx
 from max.gpu.host import DeviceContext, DeviceBuffer
 from p7_safetensors import parse_header, STEntry
 from p7_forward import bf16r, embed_gather, rope, residual_add, swiglu, read_range
-from p7_glint_gemv_km import glint_gemv_km, gemv_km_combine, GTB
+from p7_glint_gemv_km import glint_gemv_km, gemv_km_combine, GTB, glint_gemv_km_u
 from p7_decode_fast_kernels import rms_norm_block, logits_warp, ce_argmax_block, margin_block
 from p7_attention_split import attention_split_partial, attention_split_combine, NCH
 from p7_select_device import select_topk, transpose_scales, gather_rows_fix, apply_corr_ksc, combine_corr, KS, GB
@@ -266,6 +266,10 @@ def main() raises:
     # bit-identical to the per-row kernels; 0 = per-row kernel for that class.
     # GLINT_SEL_FAST=1: select_rank_f in place of select_topk (rank rule only) and select_topk2; identical selections.
     var sel_fast = getenv("GLINT_SEL_FAST", "0") == "1"
+    # GLINT_GEMV_U = 2, 4 or 8: fold GEMV with that many channel loads in flight per thread (glint_gemv_km_u), bit-identical; 0 = off.
+    var gemv_u = Int(getenv("GLINT_GEMV_U", "0"))
+    if gemv_u != 0 and gemv_u != 2 and gemv_u != 4 and gemv_u != 8:
+        raise Error("GLINT_GEMV_U must be 0, 2, 4 or 8")
     var corr_env = getenv("GLINT_CORR_R", "0")
     var corr_rc = List[Int]()
     var corr_parts = corr_env.split(",")
@@ -419,6 +423,9 @@ def main() raises:
     var k_lgf = ctx.compile_function[logits_warp[ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
     var k_cef = ctx.compile_function[ce_argmax_block[ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin]]()
     var k_mrg = ctx.compile_function[margin_block[ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
+    var k_gkmu2 = ctx.compile_function[glint_gemv_km_u[2, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
+    var k_gkmu4 = ctx.compile_function[glint_gemv_km_u[4, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
+    var k_gkmu8 = ctx.compile_function[glint_gemv_km_u[8, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
     var k_gkm = ctx.compile_function[glint_gemv_km[ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, ImmUntrackedOrigin, MutUntrackedOrigin]]()
     var k_gkc = ctx.compile_function[gemv_km_combine[ImmUntrackedOrigin, MutUntrackedOrigin]]()
     var k_sel = ctx.compile_function[select_topk[ImmUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin]]()
@@ -858,7 +865,14 @@ def main() raises:
                         else:
                             gs.enqueue_function(k_gatx, plugk_w[i], idxL[i], cntL[i], stg32[c], ovl_flags, Int32(n // 8), Int32(c * INTER), Int32((stamp_base + lr) * 2 + 1000), Int32(0), grid_dim=gbk[c], block_dim=128)
                     gs.record_event(ev_cd[i])
-                ks.enqueue_function(k_gkm, hk32[i], sk_v[i], t0b, xin_c[c], part_g, Int32(n), Int32(kd), Int32(splits_c[c]), grid_dim=(ceildiv(n // 8, GTB), splits_c[c]), block_dim=GTB)
+                if gemv_u == 2:
+                    ks.enqueue_function(k_gkmu2, hk32[i], sk_v[i], t0b, xin_c[c], part_g, Int32(n), Int32(kd), Int32(splits_c[c]), grid_dim=(ceildiv(n // 8, GTB), splits_c[c]), block_dim=GTB)
+                elif gemv_u == 4:
+                    ks.enqueue_function(k_gkmu4, hk32[i], sk_v[i], t0b, xin_c[c], part_g, Int32(n), Int32(kd), Int32(splits_c[c]), grid_dim=(ceildiv(n // 8, GTB), splits_c[c]), block_dim=GTB)
+                elif gemv_u == 8:
+                    ks.enqueue_function(k_gkmu8, hk32[i], sk_v[i], t0b, xin_c[c], part_g, Int32(n), Int32(kd), Int32(splits_c[c]), grid_dim=(ceildiv(n // 8, GTB), splits_c[c]), block_dim=GTB)
+                else:
+                    ks.enqueue_function(k_gkm, hk32[i], sk_v[i], t0b, xin_c[c], part_g, Int32(n), Int32(kd), Int32(splits_c[c]), grid_dim=(ceildiv(n // 8, GTB), splits_c[c]), block_dim=GTB)
                 ks.enqueue_function(k_gkc, part_g, yout_c[c], Int32(n), Int32(splits_c[c]), grid_dim=ceildiv(n, 128), block_dim=128)
                 if nc[i] > 0:
                     ks.enqueue_wait_for(ev_cd[i])
@@ -965,7 +979,14 @@ def main() raises:
                         ks.enqueue_function(k_normf, x, postnorm_v[lr], hbf, grid_dim=1, block_dim=256)
                     else:
                         ks.enqueue_function(k_swi, gu, act, actb, grid_dim=ceildiv(INTER, 256), block_dim=256)
-                    ks.enqueue_function(k_gkm, hk32[i], sk_v[i], t0b, xin_c[c], part_g, Int32(n), Int32(kd), Int32(splits_c[c]), grid_dim=(ceildiv(n // 8, GTB), splits_c[c]), block_dim=GTB)
+                    if gemv_u == 2:
+                        ks.enqueue_function(k_gkmu2, hk32[i], sk_v[i], t0b, xin_c[c], part_g, Int32(n), Int32(kd), Int32(splits_c[c]), grid_dim=(ceildiv(n // 8, GTB), splits_c[c]), block_dim=GTB)
+                    elif gemv_u == 4:
+                        ks.enqueue_function(k_gkmu4, hk32[i], sk_v[i], t0b, xin_c[c], part_g, Int32(n), Int32(kd), Int32(splits_c[c]), grid_dim=(ceildiv(n // 8, GTB), splits_c[c]), block_dim=GTB)
+                    elif gemv_u == 8:
+                        ks.enqueue_function(k_gkmu8, hk32[i], sk_v[i], t0b, xin_c[c], part_g, Int32(n), Int32(kd), Int32(splits_c[c]), grid_dim=(ceildiv(n // 8, GTB), splits_c[c]), block_dim=GTB)
+                    else:
+                        ks.enqueue_function(k_gkm, hk32[i], sk_v[i], t0b, xin_c[c], part_g, Int32(n), Int32(kd), Int32(splits_c[c]), grid_dim=(ceildiv(n // 8, GTB), splits_c[c]), block_dim=GTB)
                     ks.enqueue_function(k_gkc, part_g, yout_c[c], Int32(n), Int32(splits_c[c]), grid_dim=ceildiv(n, 128), block_dim=128)
                     if nc[i] > 0:
                         ks.enqueue_wait_for(ev_cd[i])

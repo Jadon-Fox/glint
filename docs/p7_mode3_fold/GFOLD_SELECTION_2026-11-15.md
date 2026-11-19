@@ -1066,3 +1066,22 @@ order perturbation moved one margin by 0.125). Delta is the operator's to set; 0
 
 Two-tier 12/28 passes under both summation orders and beats the full plug at 25% on 20% fewer bytes: covering more channels
 coarsely closes the landing gap at (7, 28) where more exact bits on fewer channels do not.
+
+### Fold GEMV load-ahead and the critical path (2026-11-19)
+
+Data `lakes/p7_glint/prims_20261119/{gemv_u,e2e2,ovl}/`.
+
+- `GLINT_GEMV_U=4` (`glint_gemv_km_u`): each thread loads the hole words of 4 channels before using any, so 4 loads are in flight
+  instead of 1. Same accumulation order, bit-identical (128 teacher-forced positions, PPL 72.24476008256185 both). Fold GEMV
+  kernel time 11.4 -> 8.1 ms/token (about 160 -> 224 GB/s on 1.8 GB of fold and scales per token).
+- End to end it barely shows (full plug 23%, 3 interleaved repeats: old kernels 58.9 / 59.0 / 59.2, all new kernels 57.1 / 57.9 /
+  60.2 ms/token). The schedule explains it: a linear's selection and gather wait for its input, the fold GEMV runs beside the
+  gather, and the next linear's input exists only after this linear's correction. Per linear the critical path is selection,
+  gather, correction; the fold is hidden under the gather, and the link idles during every selection and correction.
+- Null: splitting each gather into two halves with an event so the first half's correction chunks overlap the second half's
+  transfer (same chunks, bit-identical) was slower: full plug 65 to 68 vs 57 to 62 ms/token, two-tier 12/28 69 to 78 vs 62 to 69.
+  Likely the correction blocks take the SMs the second gather's blocks need; Mojo exposes no stream priority to test that. Code
+  removed; numbers kept.
+- What is left on the critical path is serial by data dependence. Removing it needs the selection for linear i+1 before its
+  exact input exists: a prediction (the fold-only input is the cheap look-ahead), which changes selections and must pass the
+  landing gate.
