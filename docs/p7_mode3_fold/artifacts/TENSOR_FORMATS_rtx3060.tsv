@@ -1,0 +1,14 @@
+device	NVIDIA GeForce RTX 3060	SMs	28	clock_MHz	1807
+part	format	accumulate	TFLOPS_or_TOPS
+cublas	FP32	fp32	7.17
+cublas	TF32	fp32	23.37
+cublas	FP16	fp16	46.40
+cublas	FP16	fp32	47.65
+cublas	BF16	fp32	46.61
+cublas	INT8	int32	84.17
+mma	INT4	int32	209.82
+mma	INT8	int32	101.61
+mma	FP16	fp32	52.01
+mma	FP16	fp16	52.44
+mma	BF16	fp32	51.60
+mma	TF32	fp32	25.92
