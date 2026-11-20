@@ -1187,3 +1187,30 @@ unchanged): tracks if mean matched prefix >= 20.0 and agreement >= 82.5%, on eac
 - So the two recorded standards disagree on the preset: the landing-with-margin gate (Delta = 0.25, proposed) passes it,
   the Amendment-3 tracking rule fails it. Which one M6 uses is the operator's ruling; nothing here changes either rule.
 - Speed: 55-59 ms/token (17-18 tok/s) on a shared desktop GPU, above the 10 tok/s bar.
+
+### Cheapest config that tracks free-running: none (2026-11-19)
+
+Pre-registered (`lakes/p7_glint/prims_20261119/track_min/PREREG.md`): same protocol, reference and rule as the preset run
+above; pick the fewest MB/token that tracks on A, B and C. Agreement per set (prefix in brackets), MB/token nominal:
+
+| Arm | MB/token | A | B | C | ms/token |
+|---|---|---|---|---|---|
+| two-tier 12/28 (preset) | 322 | 79.9% (24.9) | 77.6% (22.3) | 70.1% (21.3) | 55-59 |
+| two-tier 16/32 | 386 | 72.1% (20.3) | 70.8% (20.3) | 69.8% (21.3) | 62 |
+| two-tier 20/40 | 483 | **91.9%** (28.3) | 72.9% (20.8) | **85.2%** (27.2) | 74 |
+| two-tier 25/50 | 604 | **91.7%** (27.4) | 72.4% (22.7) | 68.8% (21.3) | 88 |
+| two-tier 30/60 | 724 | **93.8%** (30.0) | 63.8% (18.1) | 76.8% (24.0) | 102 |
+| full plug 35% | 564 | **87.2%** (23.6) | 69.0% (19.5) | 77.9% (24.4) | 73 |
+| full plug 40% | 644 | **95.8%** (26.7) | 70.3% (20.9) | 80.5% (25.3) | 81 |
+| full plug 50% | 805 | 80.2% (23.8) | 67.2% (21.3) | 75.8% (23.8) | 97 |
+
+(bold = passes the rule on that set)
+
+- NULL: no arm up to 50% full plug or two-tier 30/60 tracks on all three sets. Set B fails at every share tested.
+- Tracking is not monotone in bytes: on A, 40% passes at 95.8% and 50% fails at 80.2%; on C, 20/40 passes and 25/50, 30/60
+  fail. More plug does not buy more agreement past the preset's level.
+- With the preset's departures all at reference near-ties (section above), this says the 32-step agreement score is set by
+  which near-ties flip, and a near-tie flips under any change in summation, so the score behaves like a lottery over ties
+  rather than a measure of plug fidelity. The landing gate, which forgives ties and requires headroom at decided positions,
+  is monotone on the same data (12/28 passes, 23% and 25% fail).
+- That is evidence for the operator's ruling on which standard M6 uses. It does not change either rule.
