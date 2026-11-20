@@ -1159,3 +1159,31 @@ the production kernels with birddog. Data `lakes/p7_glint/prims_20261119/setC/`.
 
 Two-tier 12/28 passes on all three sets (A, B, C) with 0 decided flips and at least 0.25 logits of headroom at every decided
 position; the full plug at 23% fails all three and at 25% fails A.
+
+### Free-running tracking of the proposed preset (2026-11-19)
+
+Pre-registered before the run (`lakes/p7_glint/prims_20261119/free_run/PREREG.md`): 12 prompts x 32 greedy steps on prompt
+sets A, B and C, no force file, reference = the same lean binary at 100% plug, free-running. Rule as recorded (agent-written,
+unchanged): tracks if mean matched prefix >= 20.0 and agreement >= 82.5%, on each set separately.
+
+| Set | Arm | prefix | agreement | identical prompts | ms/token | verdict |
+|---|---|---|---|---|---|---|
+| A | two-tier 12/28 (preset) | 24.92 | 79.9% | 8/12 | 58.5 | FAILS |
+| A | full plug 23% | 16.83 | 62.5% | 3/12 | 57.9 | FAILS |
+| A | full plug 25% | 14.83 | 55.5% | 4/12 | 60.0 | FAILS |
+| B | two-tier 12/28 (preset) | 22.33 | 77.6% | 5/12 | 55.3 | FAILS |
+| B | full plug 23% | 22.42 | 73.2% | 6/12 | 55.3 | FAILS |
+| B | full plug 25% | 21.92 | 69.5% | 6/12 | 58.7 | FAILS |
+| C | two-tier 12/28 (preset) | 21.33 | 70.1% | 5/12 | 55.0 | FAILS |
+| C | full plug 23% | 19.92 | 64.3% | 3/12 | 55.4 | FAILS |
+| C | full plug 25% | 19.75 | 64.8% | 4/12 | 58.9 | FAILS |
+
+- The preset FAILS the Amendment-3 rule on all three sets: the prefix bar passes, the agreement bar does not. It is the best
+  arm on every set at equal or lower bytes, but that does not change the verdict.
+- The reference reproduces: the free-running 100% run on set C matches the stored `setC/C_ref100m.log` at all 384 tokens.
+- On set C every first departure of the preset (7 prompts) is at a position where the reference's own top-1 lead is
+  <= 0.50 logits (0.00 twice, 0.25 four times, 0.50 once). The landing gate forgives these by construction (they are not
+  decided positions); the tracking rule counts them, and after a departure the two continuations differ, so agreement falls.
+- So the two recorded standards disagree on the preset: the landing-with-margin gate (Delta = 0.25, proposed) passes it,
+  the Amendment-3 tracking rule fails it. Which one M6 uses is the operator's ruling; nothing here changes either rule.
+- Speed: 55-59 ms/token (17-18 tok/s) on a shared desktop GPU, above the 10 tok/s bar.
