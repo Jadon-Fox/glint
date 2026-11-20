@@ -40,3 +40,27 @@ Encode is **CUDA**: raw BF16 bytes go to the GPU; no Python float walk. That was
 
 INT8 pin stays in [nf4-to-int8](https://github.com/Jadon-Fox/nf4-to-int8) (`--to int8`). Both from BF16; different 256.
 Sim is **done** (offset board). Product is CUDA encode + CUDA expand. GPU evidence workflow: [`GROK_BUILD_GPU_TEST.md`](GROK_BUILD_GPU_TEST.md). Orch wire-up: [`GROK_BUILD_ORCH_GLINT_PROMPT.md`](GROK_BUILD_ORCH_GLINT_PROMPT.md).
+
+## Project 7 attach (training_orchestrator)
+
+Orch does not treat a pin directory as armed until **`orch_p7_start_gate.sh`** runs `attach/runtime_attach.sh` and passes **`lib/p7_attach_check`** (INT8 W8A8 GEMM, resident vs streamed). Build kernels first:
+
+```bash
+bash scripts/build_p7_kernels.sh
+```
+
+Runbook (host): `training_orchestrator/docs/designs/2026-11-07-ORCH-P7-START-GATE.md`. ABI file: `attach/ABI_VERSION`.
+
+## GPU regression matrix (`retest_all.sh`)
+
+One-shot rebuild + full step matrix after driver/firmware or tip changes. Writes `firmware.txt`, per-step logs, and `summary.tsv`; exits **0** only if every step passed.
+
+```bash
+bash scripts/retest_all.sh /home/workspace/lakes/glint_retest_YYYYMMDD
+# Rerun subset into an existing dir:
+RETEST_APPEND=1 RETEST_ONLY='arm0_int8_mma' bash scripts/retest_all.sh /path/existing
+```
+
+Requires GPU lease (`with_gpu_flock.sh`), container `P7_CONTAINER` (default `40-Runtime-Deps`), and host paths under `/home/workspace/pins` and `/opt/models/.hf_cache/...` as wired in the script. Narrated results: [`docs/p7_mode3_fold/artifacts/RETEST_2026-11-03.md`](docs/p7_mode3_fold/artifacts/RETEST_2026-11-03.md). **Qwen3-4B-Base** INT8 + GLINT pins and `glint_verify --parity` live in that addendum; Arm 0 forward/PPL numbers in `retest_all.sh` remain Phi-4-shaped unless extended.
+
+Mode-3 fold design notes: `docs/p7_mode3_fold/`.
