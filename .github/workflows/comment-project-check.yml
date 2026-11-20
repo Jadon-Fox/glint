@@ -1,0 +1,147 @@
+# DRAFT v6.1. Lives in /workspace/org-keeper/routing-standard-2026-11-10/v6.1/.
+# Do not install in any repository until Jadon has seen it. v1–v6 are left untouched.
+#
+# Light check only. Comments cannot be forced by templates. This workflow
+# labels the parent issue or PR and posts at most one warning when a new
+# *comment* has no Project line of its own (G5: that one warning hides later
+# unnamed comments in the same thread). There is no inheritance from
+# the parent body (Jadon / F7, as relayed by THE BOSS at 5:14 PM EST on
+# 10 November 2026, paraphrased, agent-relayed). It does not add comments
+# or parents to any board, and it never targets org FD #1–#5 or user #8.
+#
+# The bot's own warning comment, and other org-keeper bot comments that
+# start with "Project: n/a — org-keeper", stay exempt.
+#
+# G4 OPEN for Jadon: this draft still accepts "Project: n/a" from any
+# author (current behavior). The alternative is to limit n/a to exempt
+# bot comments only.
+
+name: comment-project-check
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+jobs:
+  check-project-line:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Warn once if this comment did not name its own project
+        uses: actions/github-script@v7
+        continue-on-error: true
+        with:
+          script: |
+            const comment = context.payload.comment || {};
+            const commentBody = comment.body || '';
+            const parent = context.payload.issue || context.payload.pull_request || {};
+            const parentBody = parent.body || '';
+            const number = parent.number;
+            if (!number) return;
+
+            const warningMarker = '<!-- org-keeper-needs-project-warning -->';
+            const moveMarker = '<!-- org-keeper-routing-move-log -->';
+            const orgKeeperPrefix = /^Project:\s*n\/a\s+[—-]\s+org-keeper/im;
+            const login = (comment.user && comment.user.login) || '';
+            const type = (comment.user && comment.user.type) || '';
+            const isActionsBot = type === 'Bot' || login === 'github-actions[bot]' || login.endsWith('[bot]');
+
+            // F7: the bot's own warning, MOVE log, and other org-keeper bot
+            // comments stay exempt. Other bots are not exempt.
+            if (commentBody.includes(warningMarker) || commentBody.includes(moveMarker)) return;
+            if (isActionsBot && orgKeeperPrefix.test(commentBody)) return;
+
+            const known = [
+              'LLMVE',
+              'MMLRPV',
+              'Project 6 — GLINT',
+              'GLINT',
+              'Project 6 (name pending from Jadon)',
+              'Pipeline (corpus → BigQuery → MERCS)',
+              'Multi-agent memory consolidation',
+              'HSVE',
+              'HSVE diagnostic memory database',
+              'HSVE operational diagnostic memory database',
+              'LLM long-horizon reference memory / KV reconstitution',
+              'Model-native relational/LLM substrate',
+              'Research-ledger-facing evidence/referential retrieval',
+              'n/a'
+            ];
+
+            function namedProject(text) {
+              text = text.replace(/<!--[\s\S]*?-->/g, '');
+              const heading = text.match(/###\s*Project\s*\n\s*([^\n]+)/i);
+              const line = text.match(/^Project\s*:\s*(.+)$/im);
+              const value = (heading || line) ? (heading ? heading[1] : line[1]).trim() : '';
+              if (!value || value.startsWith('_unspecified') || value.startsWith('Other')) return '';
+              return known.includes(value) ? value : '';
+            }
+
+            function namedPart(text) {
+              text = text.replace(/<!--[\s\S]*?-->/g, '');
+              // F3: do not stop at '#', so parts such as
+              // "Umbrella coordination (metadata-imperial-token#27)" parse in full.
+              const heading = text.match(/###\s*MMLRPV part\s*\n\s*([^\n]+)/i);
+              const line = text.match(/^MMLRPV-part\s*:\s*(.+)$/im);
+              const value = (heading || line) ? (heading ? heading[1] : line[1]).trim() : '';
+              if (!value || value.startsWith('N/A')) return '';
+              return value;
+            }
+
+            // No inheritance from the parent. The comment must name its own project.
+            const project = namedProject(commentBody);
+            const part = namedPart(commentBody);
+            const parentProject = namedProject(parentBody);
+
+            const labelsToAdd = [];
+            let missing = false;
+            let mismatch = false;
+            if (!project) {
+              labelsToAdd.push('needs-project');
+              missing = true;
+            }
+            if (project === 'MMLRPV' && !part) {
+              labelsToAdd.push('needs-mmlrpv-part');
+            }
+            if (project && parentProject && project !== 'n/a' && parentProject !== 'n/a' && project !== parentProject) {
+              labelsToAdd.push('needs-project');
+              mismatch = true;
+            }
+            if (labelsToAdd.length === 0) return;
+
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: number,
+              labels: labelsToAdd
+            });
+
+            const existing = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: number,
+              per_page: 100
+            });
+            if (existing.data.some(c => (c.body || '').includes(warningMarker))) return;
+
+            let msg = warningMarker + '\n';
+            msg += 'Project: n/a — org-keeper comment-project-check (warning; no board)\n\n';
+            if (missing) {
+              msg += 'This comment does not name its own project. Comments do not inherit the parent issue or PR project. Please start the comment with a `Project:` line (for example `Project: LLMVE`, or `Project: n/a` if it is not project work). Comments are not added to a board.\n';
+            }
+            if (mismatch) {
+              msg += 'This comment names `' + project + '`, which is not the parent\'s project (`' + parentProject + '`). Please use the parent\'s project, or `Project: n/a` if the comment is not project work.\n';
+            }
+            if (project === 'MMLRPV' && !part) {
+              msg += 'Project is MMLRPV, so please also name the part on this comment (see the provisional list in MMLRPV-PARTS-CANDIDATES.md), for example `MMLRPV-part: pattern-matching-machine`.\n';
+            }
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: number,
+              body: msg
+            });
