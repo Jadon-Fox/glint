@@ -40,3 +40,16 @@ Encode is **CUDA**: raw BF16 bytes go to the GPU; no Python float walk. That was
 
 INT8 pin stays in [nf4-to-int8](https://github.com/Jadon-Fox/nf4-to-int8) (`--to int8`). Both from BF16; different 256.
 Sim is **done** (offset board). Product is CUDA encode + CUDA expand. GPU evidence workflow: [`GROK_BUILD_GPU_TEST.md`](GROK_BUILD_GPU_TEST.md). Orch wire-up: [`GROK_BUILD_ORCH_GLINT_PROMPT.md`](GROK_BUILD_ORCH_GLINT_PROMPT.md).
+
+## Mode 3 fold — Mojo streamed decode and plug selection (Project 6)
+
+Historical path name `p7_*` / `docs/p7_mode3_fold/`; jurisdiction is **Project 6**, not MMLRPV Project 5.
+
+| Doc | Covers |
+|-----|--------|
+| [`docs/p7_mode3_fold/MOJO_GLINT_DECODE_2026-11-09.md`](docs/p7_mode3_fold/MOJO_GLINT_DECODE_2026-11-09.md) | Resident vs streamed decode, activation-driven selection arms, Amendment 3 free-running tracking, entry scripts `scripts/p7_mojo_glint_decode.sh` and `scripts/p7_mojo_select_retest.sh` |
+| [`docs/p7_mode3_fold/GFOLD_SELECTION_2026-11-15.md`](docs/p7_mode3_fold/GFOLD_SELECTION_2026-11-15.md) | G-fold price rule, two-tier presets (e.g. 12/28), landing headroom vs tracking bars, Nov 2026 measured nulls (no config tracks all prompt sets at preset bytes) |
+| [`docs/p7_mode3_fold/GATE_RULES.md`](docs/p7_mode3_fold/GATE_RULES.md) | Preregistered gates and claim class |
+| [`docs/p7_mode3_fold/PIN_CODEBOOK_AUTHORITY_2026-11-09.md`](docs/p7_mode3_fold/PIN_CODEBOOK_AUTHORITY_2026-11-09.md) | Embedded `_glint_cells` vs header audit |
+
+**Constraints (read before claiming M6):** teacher-forced PPL/top-1 in `MOJO_GLINT_DECODE` is not free-running tracking; `GFOLD_SELECTION` records that the proposed two-tier preset passes landing headroom but **fails** Amendment 3 agreement on sets A/B/C, and that tracking is **not** monotone in plug bytes. Lake paths cited in those docs are host evidence, not CI.
