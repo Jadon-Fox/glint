@@ -40,3 +40,51 @@ Encode is **CUDA**: raw BF16 bytes go to the GPU; no Python float walk. That was
 
 INT8 pin stays in [nf4-to-int8](https://github.com/Jadon-Fox/nf4-to-int8) (`--to int8`). Both from BF16; different 256.
 Sim is **done** (offset board). Product is CUDA encode + CUDA expand. GPU evidence workflow: [`GROK_BUILD_GPU_TEST.md`](GROK_BUILD_GPU_TEST.md). Orch wire-up: [`GROK_BUILD_ORCH_GLINT_PROMPT.md`](GROK_BUILD_ORCH_GLINT_PROMPT.md).
+
+## Mode-3 fold / lean Mojo decode (Project 6 / `p7_*`)
+
+Transient plug decode (issue #117, G-fold selection) lives under [`docs/p7_mode3_fold/`](docs/p7_mode3_fold/). The **production binary** is `mojo/p7_glint_lean.mojo` (requires `GLINT_EPHEMERAL=2`). Older entrypoints (`p7_glint_decode.mojo`, `p7_glint_select_decode.mojo`) are still in-tree; the lean decoder is the bit-identical fast path documented in [`GFOLD_SELECTION_2026-11-15.md`](docs/p7_mode3_fold/GFOLD_SELECTION_2026-11-15.md).
+
+| Doc | Covers |
+|---|---|
+| [`MOJO_GLINT_DECODE_2026-11-09.md`](docs/p7_mode3_fold/MOJO_GLINT_DECODE_2026-11-09.md) | Resident vs streamed decode, selection reference path, stream ablation |
+| [`GFOLD_SELECTION_2026-11-15.md`](docs/p7_mode3_fold/GFOLD_SELECTION_2026-11-15.md) | G-fold rule, landing gates, two-tier plug, birddog, measured ms/token tables |
+| [`GATE_RULES.md`](docs/p7_mode3_fold/GATE_RULES.md) | Amendment / landing predicates for rollout vs teacher-forced |
+| [`CAUSAL_DECODE_SCHEDULER_2026-11-09.md`](docs/p7_mode3_fold/CAUSAL_DECODE_SCHEDULER_2026-11-09.md) | Scheduler scaffold (`p7_refine.mojo`) — protocol only |
+
+**Build and identity check (host with LXC `40-Runtime-Deps` + GPU lease):**
+
+```bash
+scripts/p7_lean_retest.sh /tmp/p7_lean_out "35" 128   # builds /tmp/p7_lean, 128-step 35% teacher-forced identity gate
+```
+
+**Proposed landing preset** (two-tier 12/28, all bit-identical speed paths on; see GFOLD § landing): `scripts/p7_glint_preset.sh /tmp/p7_lean 128`
+
+**Invocation** (from `mojo/p7_glint_lean.mojo` header): after `mojo build -I mojo -o BIN mojo/p7_glint_lean.mojo`,
+
+```bash
+GLINT_EPHEMERAL=2 ./BIN PIN MODEL_DIR docs/p7_mode3_fold/artifacts STEPS PERCENT 0 MODE 0 0 0
+```
+
+`MODE` containing `roll` runs free-running rollout (12 prompts × 32 greedy steps); otherwise teacher-forced. Positional args 6, 8, 9, 10 are kept for CLI compatibility and must be `0`.
+
+**Environment switches** (read in `p7_glint_lean.mojo`; unset = defaults in source):
+
+| Variable | Role |
+|---|---|
+| `GLINT_EPHEMERAL` | Must be `2` for the lean decoder |
+| `GLINT_PLUG_BITS` | Partial plug bit width (`2` with real two-tier) |
+| `GLINT_TIER2_PCT` | Second-tier channel ceiling (percent); with `GLINT_TIER2_REAL=1` moves real 2-bit planes |
+| `GLINT_TIER2_REAL` | `1` = split plug into HI/LO pinned planes (`mojo/p7_plug_planes.mojo`) |
+| `GLINT_TIER2_FUSED` | `0`, `sel`, `x`, `1`, or `m` — fused gather/correction on top of `TIER2_REAL` (`m` = row-blocked corrections) |
+| `GLINT_CORR_R` | Row-blocked correction tile: one int or `Rqkv,Ro,Rgu,Rdown` (each `0`, `2`, `4`, or `8`) |
+| `GLINT_SEL_FAST` | `1` = `select_rank_f` / `select_topk2` (rank rule only; identical selections) |
+| `GLINT_GEMV_U` | `2`, `4`, or `8` = fold GEMV with that many channel loads in flight (`glint_gemv_km_u`) |
+| `GLINT_BIRD` / `GLINT_BIRD_X` | Look-ahead prefetch from fold output; optional wider predicted set (percent) |
+| `GLINT_ORACLE` / `GLINT_ORACLE_REUSE` | Timing study: pass A records truth; pass B reuses within *W* tokens (incompatible with `TIER2_REAL`) |
+| `GLINT_REUSE` / `GLINT_REUSE_STAT` | Real decode cross-token row reuse within *W* tokens (incompatible with `TIER2_REAL`) |
+| `GLINT_CLASS_PCT`, `GLINT_GB` | Per-class plug share and gather blocks (`q,o,gu,d` triples) |
+| `GLINT_ROLL_OFFSET`, `GLINT_MARGIN`, `GLINT_ALT_FILE` | Rollout prompt offset, logit margin logging, alt-step triplets file |
+| `GLINT_ONE_STREAM`, `GLINT_BYTE_LOG`, `GLINT_TIME_ABL` | Stream merge, byte accounting, timing ablation probes |
+
+Do not treat README tables as measured evidence; numbers and gates are in the lake paths cited in `GFOLD_SELECTION_2026-11-15.md`.
