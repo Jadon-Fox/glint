@@ -1,0 +1,67 @@
+# DRAFT v6.1. Lives in /workspace/org-keeper/routing-standard-2026-11-10/v6.1/.
+# Do not install until Jadon has seen it. v1–v6 are left untouched.
+name: Routed work
+description: Open an issue and name the project it falls under. Routing sends it only to that project's board.
+title: "[project] "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Every new issue must state which **project** it falls under. Routing adds this issue only to that project's own board. A project change adds it to the newly named board. Un-linking from the old board (MOVE) is behind repo variable ROUTING_MOVE_ENABLED, which defaults to off. When the switch is on and Jadon has confirmed the default, MOVE also un-links from the old in-table board after writing a field-value receipt; it never un-links the ten sync_mmlrpv_project_5.sh seed issues from #5.
+
+        Nothing is sent to a shared board, to the closed org Fractal-Deployment Projects 1–5, or to user#8 HANID (retiring: no new routing). An issue that names HANID is rejected with: HANID board retiring, destination OPEN (see HANID-RETIREMENT-PLAN.md).
+
+        Four charter §3.2a projects now have boards, after create + readback (H1): user#10, #11, #12, and #13 (a) `HSVE diagnostic memory database`. They are in this dropdown.
+
+        If the project is **MMLRPV**, also name the exact part. The part list is the **six component repos** (plus umbrella coordination). It is still provisional in the sense that Meta-tokenization, Referential Archetype, the HANID follow-up, and ssrl.db hydration stay OPEN and are not listed as parts. See MMLRPV-PARTS-CANDIDATES.md (this folder: `/workspace/org-keeper/routing-standard-2026-11-10/v6.1/MMLRPV-PARTS-CANDIDATES.md`).
+
+  - type: dropdown
+    id: project
+    attributes:
+      label: Project
+      description: Which project this work falls under. Required. HANID is omitted on purpose (retiring; no new routing). Project 6 is Project 6 — GLINT. The four §3.2a boards (user#10–#13) are included after create + readback.
+      options:
+        - LLMVE
+        - MMLRPV
+        - Project 6 — GLINT
+        - Multi-agent memory consolidation
+        - HSVE
+        - HSVE diagnostic memory database
+        - LLM long-horizon reference memory / KV reconstitution
+        - Model-native relational/LLM substrate
+        - Research-ledger-facing evidence/referential retrieval
+        - Other (board INCONCLUSIVE — explain in the body; will not be auto-routed)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mmlrpv_part
+    attributes:
+      label: MMLRPV part
+      description: >
+        Required when Project is MMLRPV. Choose
+        "N/A — project is not MMLRPV" otherwise. The list is the six
+        component repos (and umbrella coordination). See
+        MMLRPV-PARTS-CANDIDATES.md. The routing workflow rejects
+        MMLRPV issues left as N/A.
+      options:
+        - N/A — project is not MMLRPV
+        - metadata-imperial-token (MIT)
+        - MERCS
+        - pattern-matching-machine (PMM)
+        - research-ledger (SSRL / Ledger)
+        - vram-geometry-mapper (VGM)
+        - semantic-proposition-parser
+        - Umbrella coordination (metadata-imperial-token#27)
+        - Other / see MMLRPV-PARTS-CANDIDATES.md
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What this issue is, in enough detail for a peer to check it.
+    validations:
+      required: true

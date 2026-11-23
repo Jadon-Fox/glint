@@ -1,0 +1,580 @@
+# DRAFT v6.1. Lives in /workspace/org-keeper/routing-standard-2026-11-10/v6.1/.
+# Do not install in any repository until Jadon has seen it. v1–v6 are left untouched.
+#
+# Route Planner delta check of v3: PASS WITH FIXES
+# (/workspace/forward-pathing/routing-standard-review-2026-11-10/REVIEW.v3.md,
+# sha a26c17f3074239c8562a376e0282ddba7ea53ee4d603dc13933af1de592efdc2).
+# This draft applies G1, G2, G6; marks G3 and G4 OPEN; notes G5 in COMMENT-CONVENTION.md.
+# Jadon's 5:25 PM EST answer, as relayed by THE BOSS (paraphrased, agent-relayed):
+# the four charter §3.2a contexts each get their own NEW board (TBD numbers).
+# Those names are recognized here, but their URLs stay empty until the boards
+# exist. Creating them is not executed in this pass.
+#
+# Replaces the current blanket project-autoadd.yml pattern (personal #5 or #6
+# PLUS orgs/Fractal-Deployment/projects/4). This draft sends a new or edited
+# issue or PR only to the board named in the Project field. It never targets
+# org FD #1, #2, #3, #4 or #5, never targets closed user #2, never targets
+# retiring user #8 HANID for a new add, and never uses one shared board as
+# a default.
+#
+# MOVE is behind repo variable ROUTING_MOVE_ENABLED (must be the string
+# "true" to enable). It defaults to off: an edit adds to the newly named
+# board only, as in v2, and does not un-link the old board. When the
+# switch is on (pending Jadon):
+#   - add to the new board, then un-link from the old board only if that
+#     old board is in the routing table (the six route-to boards plus
+#     retiring #8). The switch covers #8; MOVE off #8 only once the
+#     switch is on and Jadon confirms (OPEN, G3).
+#   - before deleteProjectV2Item, read Status, iteration, and other
+#     custom field values on the old board and write them into the
+#     move-log comment as a receipt (G2). If the read fails, do not
+#     un-link; label routing-move-failed.
+#   - never un-link the 10 sync_mmlrpv_project_5.sh seed issues from #5
+#     (G1). Leave them on #5, add them to the new board, and label
+#     routing-move-skipped-seed.
+#   - never un-link boards outside the table (org FD #1–#5, user #2).
+# deleteProjectV2Item un-links the item from the board; it does not
+# delete the issue or PR.
+#
+# It does not run, replace, or compete with
+# metadata-imperial-token/scripts/sync_mmlrpv_project_5.sh:
+#   - it does not gh project link the six MMLRPV repos
+#   - it does not item-add the script's ten seed issues
+#   - it does not auto-add every issue from those repos to Project 5
+#   - it adds a newly opened or edited item to Project 5 only when the
+#     author names Project: MMLRPV and an MMLRPV part
+#   - it never un-links those ten seed issues from #5
+#
+# Per repo, install of this file and retirement of project-autoadd.yml must
+# go in the same change, only after Jadon's go. See ROLLOUT-PLAN.md.
+# Never merge without Jadon's approval. Do not touch LLMVE PRs #67 and #68.
+#
+# Name this file project-routing.yml, not project-autoadd.yml, so it is not
+# confused with the live blanket auto-add if both ever appear in a review.
+
+name: project-routing
+
+on:
+  issues:
+    types: [opened, transferred, reopened, edited]
+  pull_request:
+    types: [opened, reopened, edited]
+
+jobs:
+  route-to-named-board:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Parse Project and MMLRPV part, then choose that board only
+        uses: actions/github-script@v7
+        id: parse
+        with:
+          script: |
+            const body = context.payload.issue
+              ? context.payload.issue.body || ''
+              : (context.payload.pull_request && context.payload.pull_request.body) || '';
+            const bodyClean = body.replace(/<!--[\s\S]*?-->/g, '');
+            const previousBody = (context.payload.changes && context.payload.changes.body && context.payload.changes.body.from) || '';
+            const previousClean = previousBody.replace(/<!--[\s\S]*?-->/g, '');
+
+            function field(text, label) {
+              // F3: match to the end of the line so values such as
+              // "Umbrella coordination (metadata-imperial-token#27)" are not cut at '#'.
+              const heading = new RegExp('###\\s*' + label + '\\s*\\n\\s*([^\\n]+)', 'i');
+              const line = new RegExp('^' + label + '\\s*:\\s*(.+)$', 'im');
+              const m = text.match(heading) || text.match(line);
+              return m ? m[1].trim() : '';
+            }
+
+            const project = field(bodyClean, 'Project');
+            const part = field(bodyClean, 'MMLRPV part');
+            const previousProject = previousBody ? field(previousClean, 'Project') : '';
+
+            // Keys must match the issue-form dropdown and PROJECT-BOARD-TABLE.md.
+            // "Project 6 (name pending from Jadon)" is the v3 author-facing name;
+            // the old v2 name is accepted only as an alias so already-written
+            // bodies still route. HANID is not a route-to target.
+            const boards = {
+              'LLMVE': 'https://github.com/users/Jadon-Fox/projects/4',
+              'MMLRPV': 'https://github.com/users/Jadon-Fox/projects/5',
+              'Project 6 — GLINT': 'https://github.com/users/Jadon-Fox/projects/6',
+              'GLINT': 'https://github.com/users/Jadon-Fox/projects/6',
+              'Project 6 (name pending from Jadon)': 'https://github.com/users/Jadon-Fox/projects/6',
+              'P7 fold (glint / bf16-to-int8)': 'https://github.com/users/Jadon-Fox/projects/6',
+              'Pipeline (corpus → BigQuery → MERCS)': 'https://github.com/users/Jadon-Fox/projects/5',
+              'Multi-agent memory consolidation': 'https://github.com/users/Jadon-Fox/projects/9',
+              'HSVE': 'https://github.com/orgs/Fractal-Deployment/projects/6',
+              // Charter §3.2a boards, created 10 November 2026 (rollout steps 1 and 2c).
+              // Official (a) title is 'HSVE diagnostic memory database' (6:09 PM EST
+              // scope update). Charter wording is kept as an alias to the same board.
+              'HSVE diagnostic memory database': 'https://github.com/users/Jadon-Fox/projects/13',
+              'HSVE operational diagnostic memory database': 'https://github.com/users/Jadon-Fox/projects/13',
+              'LLM long-horizon reference memory / KV reconstitution': 'https://github.com/users/Jadon-Fox/projects/10',
+              'Model-native relational/LLM substrate': 'https://github.com/users/Jadon-Fox/projects/11',
+              'Research-ledger-facing evidence/referential retrieval': 'https://github.com/users/Jadon-Fox/projects/12'
+            };
+            const pendingBoardNames = [];
+
+            // Recognized only when reading a previous body, so a MOVE off #8
+            // can un-link once ROUTING_MOVE_ENABLED is on and Jadon confirms (G3 OPEN).
+            const retiringBoards = {
+              'Pipeline (corpus → BigQuery → MERCS)': 'https://github.com/users/Jadon-Fox/projects/7',
+              'HANID & definitions': 'https://github.com/users/Jadon-Fox/projects/8',
+              'HANID': 'https://github.com/users/Jadon-Fox/projects/8'
+            };
+
+            const lookup = Object.assign({}, boards, retiringBoards);
+
+            // Boards this draft may un-link from on MOVE (routing table,
+            // including retiring #8). The switch covers #8 (G3).
+            const managedForRemoval = [
+              'https://github.com/users/Jadon-Fox/projects/4',
+              'https://github.com/users/Jadon-Fox/projects/5',
+              'https://github.com/users/Jadon-Fox/projects/6',
+              'https://github.com/users/Jadon-Fox/projects/7',
+              'https://github.com/users/Jadon-Fox/projects/8',
+              'https://github.com/users/Jadon-Fox/projects/9',
+              'https://github.com/users/Jadon-Fox/projects/10',
+              'https://github.com/users/Jadon-Fox/projects/11',
+              'https://github.com/users/Jadon-Fox/projects/12',
+              'https://github.com/users/Jadon-Fox/projects/13',
+              'https://github.com/orgs/Fractal-Deployment/projects/6'
+            ];
+
+            // F1: deny list matches PROJECT-BOARD-TABLE.md (org FD #1–#5 and closed user #2).
+            const forbidden = [
+              'https://github.com/orgs/Fractal-Deployment/projects/1',
+              'https://github.com/orgs/Fractal-Deployment/projects/2',
+              'https://github.com/orgs/Fractal-Deployment/projects/3',
+              'https://github.com/orgs/Fractal-Deployment/projects/4',
+              'https://github.com/orgs/Fractal-Deployment/projects/5',
+              'https://github.com/users/Jadon-Fox/projects/2'
+            ];
+
+            // G1: hard-coded from sync_mmlrpv_project_5.sh (blob
+            // 36918a656e30fb90be30d3f03f05d0567c0dc590) seed URL list.
+            // Never un-link these issues from user #5.
+            const PROJECT_5 = 'https://github.com/users/Jadon-Fox/projects/5';
+            const SEED_ISSUES = [
+              'Jadon-Fox/metadata-imperial-token#27',
+              'Jadon-Fox/metadata-imperial-token#19',
+              'Jadon-Fox/metadata-imperial-token#26',
+              'Jadon-Fox/MERCS#7',
+              'Jadon-Fox/pattern-matching-machine#19',
+              'Jadon-Fox/pattern-matching-machine#23',
+              'Jadon-Fox/research-ledger#139',
+              'Jadon-Fox/research-ledger#147',
+              'Jadon-Fox/vram-geometry-mapper#51',
+              'Jadon-Fox/semantic-proposition-parser#4'
+            ];
+
+            const issueOrPr = context.payload.issue || context.payload.pull_request;
+            const number = issueOrPr.number;
+            const seedKey = context.repo.owner + '/' + context.repo.repo + '#' + number;
+            const isSeed = SEED_ISSUES.includes(seedKey);
+
+            async function addLabel(name) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: number,
+                labels: [name]
+              });
+            }
+
+            async function removeLabel(name) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: number,
+                  name
+                });
+              } catch (e) {
+                if (e.status !== 404) throw e;
+              }
+            }
+
+            // F4: when the field becomes valid, clear the needs-* labels so an edit can route.
+            async function markInvalid(reason, addNames, removeNames) {
+              for (const n of addNames) await addLabel(n);
+              for (const n of removeNames) await removeLabel(n);
+              core.setOutput('route', 'no');
+              core.setOutput('reason', reason);
+              core.setOutput('project-url', '');
+              core.setOutput('move-from-url', '');
+              core.setOutput('skip-seed', 'no');
+            }
+
+            if (project === 'HANID & definitions' || project === 'HANID') {
+              // G6: point the rejection at the retirement plan.
+              await markInvalid('hanid-retiring-no-new-routing', ['needs-project'], ['needs-mmlrpv-part']);
+              const hanidMarker = '<!-- org-keeper-hanid-retiring -->';
+              const existing = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: number,
+                per_page: 100
+              });
+              if (!existing.data.some(c => (c.body || '').includes(hanidMarker))) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: number,
+                  body: hanidMarker + '\nProject: n/a — org-keeper project-routing (warning; no board)\n\nHANID board retiring, destination OPEN (see HANID-RETIREMENT-PLAN.md). This item was not added to user#8.\n'
+                });
+              }
+              return;
+            }
+
+            if (!project || project.startsWith('_unspecified') || project.startsWith('Other')) {
+              await markInvalid('missing-or-inconclusive-project', ['needs-project'], ['needs-mmlrpv-part']);
+              return;
+            }
+
+            if (!(project in boards)) {
+              await markInvalid('unknown-project-inconclusive', ['needs-project'], ['needs-mmlrpv-part']);
+              return;
+            }
+
+            const url = boards[project];
+            // Board exists in the table but has not been created yet (TBD).
+            if (!url) {
+              await markInvalid('board-not-yet-created', ['needs-project'], ['needs-mmlrpv-part']);
+              const tbdMarker = '<!-- org-keeper-board-tbd -->';
+              const existingTbd = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: number,
+                per_page: 100
+              });
+              if (!existingTbd.data.some(c => (c.body || '').includes(tbdMarker))) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: number,
+                  body: tbdMarker + '\nProject: n/a — org-keeper project-routing (warning; no board)\n\nProject `' + project + '` is in the routing table as a board to be created (number TBD). It was not added to any board. See BOARD-CREATION-PLAN.md.\n'
+                });
+              }
+              return;
+            }
+
+            if (forbidden.includes(url)) {
+              await markInvalid('forbidden-board', ['needs-project'], ['needs-mmlrpv-part']);
+              return;
+            }
+
+            const na = !part || part.startsWith('N/A');
+            if (project === 'MMLRPV' && na) {
+              await markInvalid('mmlrpv-part-missing', ['needs-mmlrpv-part'], ['needs-project']);
+              return;
+            }
+
+            let moveFromUrl = '';
+            let moveFromName = '';
+            if (previousProject && previousProject !== project) {
+              const oldUrl = lookup[previousProject];
+              if (oldUrl && oldUrl !== url && managedForRemoval.includes(oldUrl) && !forbidden.includes(oldUrl)) {
+                moveFromUrl = oldUrl;
+                moveFromName = previousProject;
+              }
+            }
+
+            // G1: never un-link a script seed issue from #5.
+            let skipSeed = 'no';
+            if (moveFromUrl === PROJECT_5 && isSeed) {
+              skipSeed = 'yes';
+              moveFromUrl = '';
+              moveFromName = '';
+            }
+
+            await removeLabel('needs-project');
+            await removeLabel('needs-mmlrpv-part');
+            core.setOutput('route', 'yes');
+            core.setOutput('reason', 'named-board');
+            core.setOutput('project-url', url);
+            core.setOutput('project-name', project);
+            core.setOutput('move-from-url', moveFromUrl);
+            core.setOutput('move-from-name', moveFromName);
+            core.setOutput('skip-seed', skipSeed);
+
+      - name: Add to the named project's board only
+        id: add
+        if: steps.parse.outputs.route == 'yes'
+        uses: actions/add-to-project@v1.0.2
+        with:
+          project-url: ${{ steps.parse.outputs.project-url }}
+          github-token: ${{ secrets.PROJECT_TOKEN }}
+
+      - name: Clear routing-failed after a successful add
+        if: success() && steps.parse.outputs.route == 'yes'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const number = (context.payload.issue || context.payload.pull_request).number;
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: number,
+                name: 'routing-failed'
+              });
+            } catch (e) {
+              if (e.status !== 404) throw e;
+            }
+
+      - name: Label routing-failed if the add did not succeed
+        if: failure() && steps.parse.outputs.route == 'yes'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const number = (context.payload.issue || context.payload.pull_request).number;
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: number,
+              labels: ['routing-failed']
+            });
+
+      - name: Leave sync-script seed issues on #5 (G1)
+        if: success() && steps.parse.outputs.route == 'yes' && steps.parse.outputs.skip-seed == 'yes'
+        uses: actions/github-script@v7
+        env:
+          MOVE_TO_URL: ${{ steps.parse.outputs.project-url }}
+          MOVE_TO_NAME: ${{ steps.parse.outputs.project-name }}
+        with:
+          script: |
+            const issueOrPr = context.payload.issue || context.payload.pull_request;
+            const number = issueOrPr.number;
+            const marker = '<!-- org-keeper-routing-move-log -->';
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: number,
+              labels: ['routing-move-skipped-seed']
+            });
+            const existing = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: number,
+              per_page: 100
+            });
+            if (existing.data.some(c => (c.body || '').includes('routing-move-skipped-seed') && (c.body || '').includes(marker))) return;
+            const toUrl = process.env.MOVE_TO_URL || '';
+            const toName = process.env.MOVE_TO_NAME || toUrl;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: number,
+              body: marker + '\nProject: n/a — org-keeper project-routing (move log; no board)\n\nLeft on user#5 because this is a sync_mmlrpv_project_5.sh seed issue. Added to ' + toName + ' (' + toUrl + ') only. Label: routing-move-skipped-seed. The item was not un-linked from #5.\n'
+            });
+
+      - name: Move — un-link from the old in-table board and log
+        # G2: ROUTING_MOVE_ENABLED defaults to off. Un-link only when it is the string "true".
+        if: success() && steps.parse.outputs.route == 'yes' && steps.parse.outputs.move-from-url != '' && vars.ROUTING_MOVE_ENABLED == 'true'
+        uses: actions/github-script@v7
+        env:
+          PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+          MOVE_FROM_URL: ${{ steps.parse.outputs.move-from-url }}
+          MOVE_FROM_NAME: ${{ steps.parse.outputs.move-from-name }}
+          MOVE_TO_URL: ${{ steps.parse.outputs.project-url }}
+          MOVE_TO_NAME: ${{ steps.parse.outputs.project-name }}
+        with:
+          script: |
+            // MOVE default pending Jadon, and behind ROUTING_MOVE_ENABLED.
+            // Un-link only after a field-value receipt is written.
+            // Never un-link a board that is not in the routing table.
+            // Never un-link a script seed issue from #5 (defense in depth, G1).
+            const PROJECT_5 = 'https://github.com/users/Jadon-Fox/projects/5';
+            const SEED_ISSUES = [
+              'Jadon-Fox/metadata-imperial-token#27',
+              'Jadon-Fox/metadata-imperial-token#19',
+              'Jadon-Fox/metadata-imperial-token#26',
+              'Jadon-Fox/MERCS#7',
+              'Jadon-Fox/pattern-matching-machine#19',
+              'Jadon-Fox/pattern-matching-machine#23',
+              'Jadon-Fox/research-ledger#139',
+              'Jadon-Fox/research-ledger#147',
+              'Jadon-Fox/vram-geometry-mapper#51',
+              'Jadon-Fox/semantic-proposition-parser#4'
+            ];
+            const managedForRemoval = [
+              'https://github.com/users/Jadon-Fox/projects/4',
+              'https://github.com/users/Jadon-Fox/projects/5',
+              'https://github.com/users/Jadon-Fox/projects/6',
+              'https://github.com/users/Jadon-Fox/projects/7',
+              'https://github.com/users/Jadon-Fox/projects/8',
+              'https://github.com/users/Jadon-Fox/projects/9',
+              'https://github.com/users/Jadon-Fox/projects/10',
+              'https://github.com/users/Jadon-Fox/projects/11',
+              'https://github.com/users/Jadon-Fox/projects/12',
+              'https://github.com/users/Jadon-Fox/projects/13',
+              'https://github.com/orgs/Fractal-Deployment/projects/6'
+            ];
+            const forbidden = [
+              'https://github.com/orgs/Fractal-Deployment/projects/1',
+              'https://github.com/orgs/Fractal-Deployment/projects/2',
+              'https://github.com/orgs/Fractal-Deployment/projects/3',
+              'https://github.com/orgs/Fractal-Deployment/projects/4',
+              'https://github.com/orgs/Fractal-Deployment/projects/5',
+              'https://github.com/users/Jadon-Fox/projects/2'
+            ];
+
+            function norm(u) { return (u || '').replace(/\/+$/, ''); }
+
+            const fromUrl = norm(process.env.MOVE_FROM_URL);
+            const toUrl = norm(process.env.MOVE_TO_URL);
+            const fromName = process.env.MOVE_FROM_NAME || fromUrl;
+            const toName = process.env.MOVE_TO_NAME || toUrl;
+            const issueOrPr = context.payload.issue || context.payload.pull_request;
+            const number = issueOrPr.number;
+            const nodeId = issueOrPr.node_id;
+            const seedKey = context.repo.owner + '/' + context.repo.repo + '#' + number;
+            const marker = '<!-- org-keeper-routing-move-log -->';
+
+            async function addLabel(name) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: number,
+                labels: [name]
+              });
+            }
+
+            if (!fromUrl || !managedForRemoval.includes(fromUrl) || forbidden.includes(fromUrl)) {
+              return;
+            }
+
+            if (fromUrl === PROJECT_5 && SEED_ISSUES.includes(seedKey)) {
+              await addLabel('routing-move-skipped-seed');
+              return;
+            }
+
+            const token = process.env.PROJECT_TOKEN;
+            if (!token) {
+              await addLabel('routing-move-failed');
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: number,
+                body: marker + '\nProject: n/a — org-keeper project-routing (move log; no board)\n\nMOVE was requested (' + fromName + ' → ' + toName + ') but PROJECT_TOKEN is missing, so nothing was un-linked. The item was already added to ' + toUrl + '. Boards outside the routing table were left untouched. No field-value receipt could be written, so deleteProjectV2Item was not called.\n'
+              });
+              return;
+            }
+
+            async function gql(query, variables) {
+              const res = await fetch('https://api.github.com/graphql', {
+                method: 'POST',
+                headers: {
+                  Authorization: 'Bearer ' + token,
+                  'Content-Type': 'application/json',
+                  Accept: 'application/vnd.github+json'
+                },
+                body: JSON.stringify({ query, variables })
+              });
+              const json = await res.json();
+              if (json.errors) throw new Error(JSON.stringify(json.errors));
+              return json.data;
+            }
+
+            function fieldName(node) {
+              const f = node.field || {};
+              return f.name || '(unnamed field)';
+            }
+
+            function formatFieldNode(node) {
+              const typ = node.__typename || '';
+              const name = fieldName(node);
+              if (typ === 'ProjectV2ItemFieldTextValue') return '- ' + name + ': ' + (node.text == null ? '' : String(node.text));
+              if (typ === 'ProjectV2ItemFieldNumberValue') return '- ' + name + ': ' + (node.number == null ? '' : String(node.number));
+              if (typ === 'ProjectV2ItemFieldDateValue') return '- ' + name + ': ' + (node.date == null ? '' : String(node.date));
+              if (typ === 'ProjectV2ItemFieldSingleSelectValue') return '- ' + name + ': ' + (node.name == null ? '' : String(node.name));
+              if (typ === 'ProjectV2ItemFieldIterationValue') {
+                const bits = [node.title, node.startDate ? 'start ' + node.startDate : '', node.duration ? node.duration + 'd' : ''].filter(Boolean);
+                return '- ' + name + ': ' + bits.join(', ');
+              }
+              if (typ === 'ProjectV2ItemFieldMilestoneValue') {
+                const title = (node.milestone && node.milestone.title) || '';
+                return '- ' + name + ': ' + title;
+              }
+              if (typ === 'ProjectV2ItemFieldLabelValue') {
+                const labels = (((node.labels || {}).nodes) || []).map(l => l.name).join(', ');
+                return '- ' + name + ': ' + labels;
+              }
+              if (typ === 'ProjectV2ItemFieldUserValue') {
+                const users = (((node.users || {}).nodes) || []).map(u => u.login).join(', ');
+                return '- ' + name + ': ' + users;
+              }
+              if (typ === 'ProjectV2ItemFieldRepositoryValue') {
+                const repo = (node.repository && node.repository.nameWithOwner) || '';
+                return '- ' + name + ': ' + repo;
+              }
+              if (typ === 'ProjectV2ItemFieldPullRequestValue') {
+                const prs = (((node.pullRequests || {}).nodes) || []).map(p => '#' + p.number).join(', ');
+                return '- ' + name + ': ' + prs;
+              }
+              if (typ === 'ProjectV2ItemFieldReviewerValue') {
+                const revs = (((node.reviewers || {}).nodes) || []).map(r => r.login || r.name).filter(Boolean).join(', ');
+                return '- ' + name + ': ' + revs;
+              }
+              return '- ' + name + ': unsupported type ' + (typ || '(missing __typename)');
+            }
+
+            const itemQuery = 'query ($id: ID!) { node(id: $id) { ... on Issue { projectItems(first: 50) { nodes { id project { id url } fieldValues(first: 50) { nodes { __typename ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2Field { name } ... on ProjectV2SingleSelectField { name } ... on ProjectV2IterationField { name } } } ... on ProjectV2ItemFieldNumberValue { number field { ... on ProjectV2Field { name } ... on ProjectV2SingleSelectField { name } ... on ProjectV2IterationField { name } } } ... on ProjectV2ItemFieldDateValue { date field { ... on ProjectV2Field { name } ... on ProjectV2SingleSelectField { name } ... on ProjectV2IterationField { name } } } ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2Field { name } ... on ProjectV2SingleSelectField { name } ... on ProjectV2IterationField { name } } } ... on ProjectV2ItemFieldIterationValue { title startDate duration field { ... on ProjectV2Field { name } ... on ProjectV2SingleSelectField { name } ... on ProjectV2IterationField { name } } } ... on ProjectV2ItemFieldMilestoneValue { milestone { title } field { ... on ProjectV2Field { name } ... on ProjectV2SingleSelectField { name } ... on ProjectV2IterationField { name } } } ... on ProjectV2ItemFieldLabelValue { labels(first: 20) { nodes { name } } field { ... on ProjectV2Field { name } ... on ProjectV2SingleSelectField { name } ... on ProjectV2IterationField { name } } } ... on ProjectV2ItemFieldUserValue { users(first: 20) { nodes { login } } field { ... on ProjectV2Field { name } ... on ProjectV2SingleSelectField { name } ... on ProjectV2IterationField { name } } } ... on ProjectV2ItemFieldRepositoryValue { repository { nameWithOwner } field { ... on ProjectV2Field { name } ... on ProjectV2SingleSelectField { name } ... on ProjectV2IterationField { name } } } ... on ProjectV2ItemFieldPullRequestValue { pullRequests(first: 10) { nodes { number } } field { ... on ProjectV2Field { name } ... on ProjectV2SingleSelectField { name } ... on ProjectV2IterationField { name } } } ... on ProjectV2ItemFieldReviewerValue { reviewers(first: 20) { nodes { ... on User { login } ... on Team { name } } } field { ... on ProjectV2Field { name } ... on ProjectV2SingleSelectField { name } ... on ProjectV2IterationField { name } } } } } } } } ... on PullRequest { projectItems(first: 50) { nodes { id project { id url } fieldValues(first: 50) { nodes { __typename ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2Field { name } ... on ProjectV2SingleSelectField { name } ... on ProjectV2IterationField { name } } } ... on ProjectV2ItemFieldNumberValue { number field { ... on ProjectV2Field { name } ... on ProjectV2SingleSelectField { name } ... on ProjectV2IterationField { name } } } ... on ProjectV2ItemFieldDateValue { date field { ... on ProjectV2Field { name } ... on ProjectV2SingleSelectField { name } ... on ProjectV2IterationField { name } } } ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2Field { name } ... on ProjectV2SingleSelectField { name } ... on ProjectV2IterationField { name } } } ... on ProjectV2ItemFieldIterationValue { title startDate duration field { ... on ProjectV2Field { name } ... on ProjectV2SingleSelectField { name } ... on ProjectV2IterationField { name } } } ... on ProjectV2ItemFieldMilestoneValue { milestone { title } field { ... on ProjectV2Field { name } ... on ProjectV2SingleSelectField { name } ... on ProjectV2IterationField { name } } } ... on ProjectV2ItemFieldLabelValue { labels(first: 20) { nodes { name } } field { ... on ProjectV2Field { name } ... on ProjectV2SingleSelectField { name } ... on ProjectV2IterationField { name } } } ... on ProjectV2ItemFieldUserValue { users(first: 20) { nodes { login } } field { ... on ProjectV2Field { name } ... on ProjectV2SingleSelectField { name } ... on ProjectV2IterationField { name } } } ... on ProjectV2ItemFieldRepositoryValue { repository { nameWithOwner } field { ... on ProjectV2Field { name } ... on ProjectV2SingleSelectField { name } ... on ProjectV2IterationField { name } } } ... on ProjectV2ItemFieldPullRequestValue { pullRequests(first: 10) { nodes { number } } field { ... on ProjectV2Field { name } ... on ProjectV2SingleSelectField { name } ... on ProjectV2IterationField { name } } } ... on ProjectV2ItemFieldReviewerValue { reviewers(first: 20) { nodes { ... on User { login } ... on Team { name } } } field { ... on ProjectV2Field { name } ... on ProjectV2SingleSelectField { name } ... on ProjectV2IterationField { name } } } } } } } } } } }';
+
+            try {
+              const data = await gql(itemQuery, { id: nodeId });
+              const items = (data.node && data.node.projectItems && data.node.projectItems.nodes) || [];
+              const targets = items.filter(n => n.project && norm(n.project.url) === fromUrl);
+              if (targets.length === 0) {
+                await addLabel('routing-move-failed');
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: number,
+                  body: marker + '\nProject: n/a — org-keeper project-routing (move log; no board)\n\nMOVE was requested (' + fromName + ' → ' + toName + ') but no project item was found on ' + fromUrl + ', so nothing was un-linked. The item was already added to ' + toUrl + '. Boards outside the routing table were left untouched.\n'
+                });
+                return;
+              }
+
+              const receiptLines = [];
+              for (const item of targets) {
+                const nodes = ((item.fieldValues || {}).nodes) || [];
+                const lines = nodes.map(formatFieldNode).filter(Boolean);
+                if (lines.length === 0) {
+                  receiptLines.push('Field values on the old board (' + fromUrl + ') before un-link: none returned (no Status, iteration, or other custom field values were present on the card, or the API returned an empty set). This listing is from fieldValues(first: 50); a card with more than 50 fields may be incomplete.');
+                } else {
+                  receiptLines.push('Field values on the old board (' + fromUrl + ') before un-link (fieldValues(first: 50); a card with more than 50 fields may be incomplete):');
+                  receiptLines.push.apply(receiptLines, lines);
+                }
+              }
+
+              // G2: write the receipt, then un-link. If the comment fails, do not un-link.
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: number,
+                body: marker + '\nProject: n/a — org-keeper project-routing (move log; no board)\n\nMoved: ' + fromName + ' → ' + toName + '. About to remove the project item from ' + fromUrl + ' only (board un-link, not an issue delete). Boards outside the routing table were left untouched.\n\n' + receiptLines.join('\n') + '\n'
+              });
+
+              for (const item of targets) {
+                if (forbidden.includes(norm(item.project.url))) continue;
+                if (!managedForRemoval.includes(norm(item.project.url))) continue;
+                if (norm(item.project.url) === PROJECT_5 && SEED_ISSUES.includes(seedKey)) continue;
+                await gql(
+                  'mutation ($projectId: ID!, $itemId: ID!) { deleteProjectV2Item(input: { projectId: $projectId, itemId: $itemId }) { deletedItemId } }',
+                  { projectId: item.project.id, itemId: item.id }
+                );
+              }
+              await addLabel('routing-moved');
+            } catch (e) {
+              await addLabel('routing-move-failed');
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: number,
+                body: marker + '\nProject: n/a — org-keeper project-routing (move log; no board)\n\nMOVE was requested (' + fromName + ' → ' + toName + ') but the field-value read or un-link step failed. The item was already added to ' + toUrl + ' and was left on the old board. Boards outside the routing table were left untouched. Error (no secrets): ' + String(e && e.message ? e.message : e) + '\n'
+              });
+            }
