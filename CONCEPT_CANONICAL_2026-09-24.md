@@ -38,4 +38,4 @@ Can activation-derived routing identify a bounded high-fidelity subset that trac
 
 ## Jurisdiction
 
-GLINT is adjacent to LLMVE / HSVE (hardware working-set) but is **not** an LLMVE Ω variable and must not be merged into LLMVE findings by analogy. Prefer distinction-first (`lookup_canonicality_precedence`).
+GLINT is Project 6, in its own repository (`Jadon-Fox/glint`). It is not HSVE (host and storage governance, `Fractal-Deployment/HSVE`) and not LLMVE (Project 4), is not an LLMVE Ω variable, and must not be merged into LLMVE or HSVE findings by analogy. Prefer distinction-first (`lookup_canonicality_precedence`).
